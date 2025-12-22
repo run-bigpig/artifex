@@ -191,3 +191,9 @@ func (a *App) Update() (string, error) {
 	}
 	return "", nil
 }
+
+// UpdateWithProgress 执行更新并返回进度信息（JSON格式）
+// 返回 JSON 格式的 UpdateProgress
+func (a *App) UpdateWithProgress() (string, error) {
+	return a.updateService.UpdateWithProgress()
+}

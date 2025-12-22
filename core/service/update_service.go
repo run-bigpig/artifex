@@ -30,6 +30,13 @@ type UpdateInfo struct {
 	Error          string `json:"error,omitempty"`
 }
 
+// UpdateProgress 更新进度信息
+type UpdateProgress struct {
+	Status  string `json:"status"`  // "checking", "downloading", "installing", "completed", "error"
+	Message string `json:"message"` // 状态消息
+	Percent int    `json:"percent"`  // 进度百分比 (0-100)
+}
+
 // NewUpdateService 创建更新服务实例
 func NewUpdateService(repoOwner, repoName, currentVersion string) *UpdateService {
 	return &UpdateService{
@@ -117,9 +124,11 @@ func (u *UpdateService) GetCurrentVersion() string {
 }
 
 // Update 执行更新（下载并替换当前可执行文件）
-// 注意：在 Wails 应用中，更新可能需要特殊处理
+// 注意：在 Wails 应用中，更新完成后需要重启应用才能生效
 func (u *UpdateService) Update() error {
 	repo := fmt.Sprintf("%s/%s", u.repoOwner, u.repoName)
+	
+	// 检测最新版本
 	latest, found, err := selfupdate.DetectLatest(repo)
 	if err != nil {
 		return fmt.Errorf("检测更新失败: %w", err)
@@ -145,12 +154,105 @@ func (u *UpdateService) Update() error {
 		return fmt.Errorf("获取可执行文件路径失败: %w", err)
 	}
 
-	// 执行更新
+	// 执行更新（下载并替换可执行文件）
+	// 注意：selfupdate.UpdateTo 会下载新版本并替换当前可执行文件
+	// 更新完成后，应用需要重启才能使用新版本
 	if err := selfupdate.UpdateTo(latest.AssetURL, exe); err != nil {
 		return fmt.Errorf("更新失败: %w", err)
 	}
 
 	return nil
+}
+
+// UpdateWithProgress 执行更新并返回进度信息（JSON格式）
+// 由于 selfupdate 库不支持进度回调，这里返回状态信息
+func (u *UpdateService) UpdateWithProgress() (string, error) {
+	progress := UpdateProgress{
+		Status:  "checking",
+		Message: "正在检查更新...",
+		Percent: 0,
+	}
+
+	repo := fmt.Sprintf("%s/%s", u.repoOwner, u.repoName)
+	
+	// 检测最新版本
+	progress.Status = "checking"
+	progress.Message = "正在检测最新版本..."
+	progress.Percent = 10
+	
+	latest, found, err := selfupdate.DetectLatest(repo)
+	if err != nil {
+		progress.Status = "error"
+		progress.Message = fmt.Sprintf("检测更新失败: %v", err)
+		progress.Percent = 0
+		data, _ := json.Marshal(progress)
+		return string(data), fmt.Errorf("检测更新失败: %w", err)
+	}
+
+	if !found {
+		progress.Status = "error"
+		progress.Message = "未找到更新"
+		progress.Percent = 0
+		data, _ := json.Marshal(progress)
+		return string(data), fmt.Errorf("未找到更新")
+	}
+
+	// 解析当前版本并检查是否需要更新
+	currentVer, err := semver.ParseTolerant(u.currentVersion)
+	if err != nil {
+		progress.Status = "error"
+		progress.Message = fmt.Sprintf("版本格式解析失败: %v", err)
+		progress.Percent = 0
+		data, _ := json.Marshal(progress)
+		return string(data), fmt.Errorf("版本格式解析失败: %w", err)
+	}
+
+	if !latest.Version.GT(currentVer) {
+		progress.Status = "error"
+		progress.Message = "已是最新版本"
+		progress.Percent = 0
+		data, _ := json.Marshal(progress)
+		return string(data), fmt.Errorf("已是最新版本")
+	}
+
+	// 获取当前可执行文件路径
+	progress.Status = "downloading"
+	progress.Message = fmt.Sprintf("正在下载版本 %s...", latest.Version.String())
+	progress.Percent = 30
+	
+	exe, err := os.Executable()
+	if err != nil {
+		progress.Status = "error"
+		progress.Message = fmt.Sprintf("获取可执行文件路径失败: %v", err)
+		progress.Percent = 0
+		data, _ := json.Marshal(progress)
+		return string(data), fmt.Errorf("获取可执行文件路径失败: %w", err)
+	}
+
+	// 执行更新
+	progress.Status = "installing"
+	progress.Message = "正在安装更新..."
+	progress.Percent = 70
+	
+	if err := selfupdate.UpdateTo(latest.AssetURL, exe); err != nil {
+		progress.Status = "error"
+		progress.Message = fmt.Sprintf("更新失败: %v", err)
+		progress.Percent = 0
+		data, _ := json.Marshal(progress)
+		return string(data), fmt.Errorf("更新失败: %w", err)
+	}
+
+	// 更新完成
+	progress.Status = "completed"
+	progress.Message = fmt.Sprintf("更新完成！新版本 %s 已安装，请重启应用以使用新版本。", latest.Version.String())
+	progress.Percent = 100
+	
+	data, err := json.Marshal(progress)
+	if err != nil {
+		return "", fmt.Errorf("序列化进度信息失败: %w", err)
+	}
+
+	return string(data), nil
 }
 
 // GetExecutableName 获取当前平台的可执行文件名

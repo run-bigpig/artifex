@@ -1,12 +1,16 @@
 import React, { useState, useEffect } from 'react';
 import { Settings as SettingsType, AISettings } from '../types/settings';
 import { loadSettings, saveSettings } from '../services/settingsService';
-import { X, Save, Loader2, Eye, EyeOff, CheckCircle2, AlertCircle } from 'lucide-react';
+import { X, Save, Loader2, Eye, EyeOff, CheckCircle2, AlertCircle, RefreshCw, Info, Download, ExternalLink } from 'lucide-react';
+import { getCurrentVersion, checkForUpdate, updateWithProgress, UpdateInfo, UpdateProgress } from '../services/updateService';
+import { Quit } from '../wailsjs/runtime/runtime';
 
 interface SettingsProps {
   isOpen: boolean;
   onClose: () => void;
 }
+
+type TabType = 'ai' | 'about';
 
 const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
   const [settings, setSettings] = useState<SettingsType | null>(null);
@@ -14,11 +18,21 @@ const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
   const [saving, setSaving] = useState(false);
   const [showApiKeys, setShowApiKeys] = useState<Record<string, boolean>>({});
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [activeTab, setActiveTab] = useState<TabType>('ai');
+  const [currentVersion, setCurrentVersion] = useState<string>('');
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [updating, setUpdating] = useState(false);
+  const [updateProgress, setUpdateProgress] = useState<UpdateProgress | null>(null);
+  const [updateError, setUpdateError] = useState<string | null>(null);
 
-  // 加载设置
+  // 加载设置和版本信息
   useEffect(() => {
-    if (isOpen && !settings) {
-      loadSettingsData();
+    if (isOpen) {
+      if (!settings) {
+        loadSettingsData();
+      }
+      loadVersionInfo();
     }
   }, [isOpen]);
 
@@ -32,6 +46,77 @@ const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
       setMessage({ type: 'error', text: '加载设置失败' });
     } finally {
       setLoading(false);
+    }
+  };
+
+  const loadVersionInfo = async () => {
+    try {
+      const version = await getCurrentVersion();
+      setCurrentVersion(version);
+    } catch (error) {
+      console.error('Failed to load version:', error);
+    }
+  };
+
+  // 检查更新
+  const handleCheckUpdate = async () => {
+    setCheckingUpdate(true);
+    setUpdateError(null);
+    setUpdateInfo(null);
+    
+    try {
+      const info = await checkForUpdate();
+      setUpdateInfo(info);
+      
+      if (info.error) {
+        setUpdateError(info.error);
+      }
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : '检查更新失败';
+      setUpdateError(errorMessage);
+    } finally {
+      setCheckingUpdate(false);
+    }
+  };
+
+  // 执行更新
+  const handleUpdate = async () => {
+    if (!updateInfo?.hasUpdate) return;
+
+    setUpdating(true);
+    setUpdateError(null);
+    setUpdateProgress({
+      status: 'checking',
+      message: '正在准备更新...',
+      percent: 0,
+    });
+
+    try {
+      const finalProgress = await updateWithProgress((progress) => {
+        setUpdateProgress(progress);
+      });
+
+      if (finalProgress.status === 'completed') {
+        // 更新完成，延迟退出应用
+        setTimeout(() => {
+          Quit();
+        }, 3000);
+      } else if (finalProgress.status === 'error') {
+        setUpdateError(finalProgress.message);
+        setUpdating(false);
+      }
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : '更新失败';
+      setUpdateError(errorMessage);
+      setUpdating(false);
+      setUpdateProgress(null);
+    }
+  };
+
+  // 打开发布页面
+  const handleOpenRelease = () => {
+    if (updateInfo?.releaseUrl) {
+      window.open(updateInfo.releaseUrl, '_blank');
     }
   };
 
@@ -97,9 +182,34 @@ const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
           </button>
         </div>
 
+        {/* Tabs */}
+        <div className="flex border-b border-slate-800 px-6">
+          <button
+            onClick={() => setActiveTab('ai')}
+            className={`px-4 py-3 font-medium text-sm transition-colors border-b-2 ${
+              activeTab === 'ai'
+                ? 'text-blue-400 border-blue-400'
+                : 'text-slate-400 border-transparent hover:text-slate-200'
+            }`}
+          >
+            AI 配置
+          </button>
+          <button
+            onClick={() => setActiveTab('about')}
+            className={`px-4 py-3 font-medium text-sm transition-colors border-b-2 ${
+              activeTab === 'about'
+                ? 'text-blue-400 border-blue-400'
+                : 'text-slate-400 border-transparent hover:text-slate-200'
+            }`}
+          >
+            关于
+          </button>
+        </div>
+
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-6">
-          <div className="space-y-6">
+          {activeTab === 'ai' && (
+            <div className="space-y-6">
             {/* Provider Selection */}
             <div className="space-y-2">
                 <label className="text-sm font-medium text-slate-300">AI 提供商</label>
@@ -377,7 +487,175 @@ const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
                   </div>
                 </div>
             )}
-          </div>
+
+            </div>
+          )}
+
+          {activeTab === 'about' && (
+            <div className="space-y-6">
+              {/* 版本信息 */}
+              <div className="space-y-4 p-4 bg-slate-800/50 rounded-lg">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 bg-blue-500/10 rounded-lg">
+                    <Info className="w-6 h-6 text-blue-500" />
+                  </div>
+                  <div>
+                    <h3 className="text-lg font-semibold text-slate-200">应用信息</h3>
+                    <p className="text-slate-400 text-sm">绘图助手</p>
+                  </div>
+                </div>
+                
+                {currentVersion && (
+                  <div className="flex items-center justify-between p-3 bg-slate-900/50 rounded-lg">
+                    <span className="text-slate-300">当前版本</span>
+                    <span className="text-slate-200 font-mono font-semibold">{currentVersion}</span>
+                  </div>
+                )}
+              </div>
+
+              {/* 应用更新 */}
+              <div className="space-y-4 p-4 bg-slate-800/50 rounded-lg">
+                <h3 className="text-lg font-semibold text-slate-200">应用更新</h3>
+                
+                {/* 检查更新按钮 */}
+                {!updateInfo && !checkingUpdate && !updating && (
+                  <>
+                    <p className="text-slate-400 text-sm">
+                      检查并安装最新版本的应用更新
+                    </p>
+                    <button
+                      onClick={handleCheckUpdate}
+                      className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-500 transition-colors flex items-center gap-2"
+                    >
+                      <RefreshCw size={18} />
+                      检查更新
+                    </button>
+                  </>
+                )}
+
+                {/* 检查中 */}
+                {checkingUpdate && (
+                  <div className="flex flex-col items-center gap-4 py-4">
+                    <Loader2 className="w-8 h-8 text-blue-500 animate-spin" />
+                    <p className="text-slate-400">正在检查更新...</p>
+                  </div>
+                )}
+
+                {/* 更新信息 */}
+                {updateInfo && !updating && (
+                  <div className="space-y-4">
+                    {updateInfo.hasUpdate ? (
+                      <>
+                        <div className="flex items-center gap-3 p-4 bg-blue-500/10 border border-blue-500/20 rounded-lg">
+                          <CheckCircle2 className="w-6 h-6 text-blue-500 flex-shrink-0" />
+                          <div className="flex-1">
+                            <p className="text-blue-400 font-semibold">发现新版本！</p>
+                            <p className="text-slate-300 text-sm mt-1">
+                              最新版本: <span className="font-mono font-semibold">{updateInfo.latestVersion}</span>
+                            </p>
+                          </div>
+                        </div>
+
+                        {updateInfo.releaseNotes && (
+                          <div className="p-4 bg-slate-900/50 rounded-lg">
+                            <h4 className="text-slate-200 font-semibold mb-2">更新说明</h4>
+                            <div className="text-slate-400 text-sm whitespace-pre-wrap">
+                              {updateInfo.releaseNotes}
+                            </div>
+                          </div>
+                        )}
+
+                        <div className="flex gap-3">
+                          <button
+                            onClick={handleUpdate}
+                            className="flex-1 px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-500 transition-colors flex items-center justify-center gap-2"
+                          >
+                            <Download size={18} />
+                            立即更新
+                          </button>
+                          {updateInfo.releaseUrl && (
+                            <button
+                              onClick={handleOpenRelease}
+                              className="px-6 py-3 bg-slate-700 text-slate-200 rounded-lg hover:bg-slate-600 transition-colors flex items-center gap-2"
+                            >
+                              <ExternalLink size={18} />
+                              查看详情
+                            </button>
+                          )}
+                        </div>
+                      </>
+                    ) : (
+                      <div className="flex flex-col items-center gap-4 py-4">
+                        <CheckCircle2 className="w-12 h-12 text-green-500" />
+                        <p className="text-slate-300 font-semibold">已是最新版本</p>
+                        <p className="text-slate-400 text-sm">
+                          当前版本: <span className="font-mono">{updateInfo.currentVersion}</span>
+                        </p>
+                        <button
+                          onClick={handleCheckUpdate}
+                          className="px-4 py-2 bg-slate-700 text-slate-200 rounded-lg hover:bg-slate-600 transition-colors flex items-center gap-2"
+                        >
+                          <RefreshCw size={18} />
+                          重新检查
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* 更新进度 */}
+                {updating && updateProgress && (
+                  <div className="space-y-4">
+                    <div className="flex items-center gap-3">
+                      <Loader2 className="w-6 h-6 text-blue-500 animate-spin" />
+                      <div className="flex-1">
+                        <p className="text-slate-200 font-semibold">{updateProgress.message}</p>
+                        <div className="mt-2 w-full bg-slate-800 rounded-full h-2">
+                          <div
+                            className="bg-blue-500 h-2 rounded-full transition-all duration-300"
+                            style={{ width: `${updateProgress.percent}%` }}
+                          />
+                        </div>
+                        <p className="text-slate-400 text-sm mt-1">{updateProgress.percent}%</p>
+                      </div>
+                    </div>
+
+                    {updateProgress.status === 'completed' && (
+                      <div className="flex items-center gap-3 p-4 bg-green-500/10 border border-green-500/20 rounded-lg">
+                        <CheckCircle2 className="w-6 h-6 text-green-500 flex-shrink-0" />
+                        <div className="flex-1">
+                          <p className="text-green-400 font-semibold">更新完成！</p>
+                          <p className="text-slate-300 text-sm mt-1">
+                            应用将在几秒后自动退出，请重新打开应用以使用新版本。
+                          </p>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* 错误信息 */}
+                {updateError && (
+                  <div className="flex items-start gap-3 p-4 bg-red-500/10 border border-red-500/20 rounded-lg">
+                    <AlertCircle className="w-6 h-6 text-red-500 flex-shrink-0 mt-0.5" />
+                    <div className="flex-1">
+                      <p className="text-red-400 font-semibold">错误</p>
+                      <p className="text-slate-300 text-sm mt-1">{updateError}</p>
+                    </div>
+                    <button
+                      onClick={() => {
+                        setUpdateError(null);
+                        setUpdateInfo(null);
+                      }}
+                      className="text-slate-400 hover:text-slate-200"
+                    >
+                      <X size={18} />
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Footer */}
@@ -403,23 +681,25 @@ const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
             >
               取消
             </button>
-            <button
-              onClick={handleSave}
-              disabled={saving}
-              className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-            >
-              {saving ? (
-                <>
-                  <Loader2 size={18} className="animate-spin" />
-                  保存中...
-                </>
-              ) : (
-                <>
-                  <Save size={18} />
-                  保存
-                </>
-              )}
-            </button>
+            {activeTab === 'ai' && (
+              <button
+                onClick={handleSave}
+                disabled={saving}
+                className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+              >
+                {saving ? (
+                  <>
+                    <Loader2 size={18} className="animate-spin" />
+                    保存中...
+                  </>
+                ) : (
+                  <>
+                    <Save size={18} />
+                    保存
+                  </>
+                )}
+              </button>
+            )}
           </div>
         </div>
       </div>
