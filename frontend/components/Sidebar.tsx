@@ -463,7 +463,8 @@ const Sidebar: React.FC<SidebarProps> = ({
   // --- Prompt Enhancement ---
   const handleEnhancePrompt = async () => {
     // Allow enhance if there is text OR attachments
-    if ((!inputValue.trim() && resolvedAttachments.length === 0) || isEnhancing) return;
+    // 不允许在请求进行中或正在优化时执行
+    if ((!inputValue.trim() && resolvedAttachments.length === 0) || isEnhancing || isRequestActive) return;
     
     setIsEnhancing(true);
     try {
@@ -486,7 +487,8 @@ const Sidebar: React.FC<SidebarProps> = ({
    */
   const handleCancelRequest = () => {
     if (currentRequest) {
-      currentRequest.abort();
+      // 先标记为已取消，防止重复取消
+      const requestToCancel = currentRequest;
       setCurrentRequest(null);
       setIsRequestActive(false);
       
@@ -497,7 +499,18 @@ const Sidebar: React.FC<SidebarProps> = ({
         currentLoadingIdRef.current = null;
       }
       
+      // 取消请求
+      requestToCancel.abort();
+      
       addMessage('model', '请求已取消', 'error');
+    } else if (isRequestActive) {
+      // 如果没有 currentRequest 但 isRequestActive 为 true，直接重置状态
+      setIsRequestActive(false);
+      const loadingId = currentLoadingIdRef.current;
+      if (loadingId) {
+        setMessages(prev => prev.filter(msg => msg.id !== loadingId));
+        currentLoadingIdRef.current = null;
+      }
     }
   };
 
@@ -1038,13 +1051,13 @@ const Sidebar: React.FC<SidebarProps> = ({
                       <button
                         type="button"
                         onClick={handleEnhancePrompt}
-                        disabled={isEnhancing || isProcessing}
+                        disabled={isEnhancing || isRequestActive}
                         className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all border
-                          ${isEnhancing 
-                            ? 'bg-purple-900/20 text-purple-400 border-purple-500/30 cursor-wait' 
+                          ${isEnhancing || isRequestActive
+                            ? 'bg-purple-900/20 text-purple-400 border-purple-500/30 cursor-wait opacity-50' 
                             : 'bg-purple-500/5 text-purple-400 border-purple-500/20 hover:bg-purple-500/10 hover:border-purple-500/40 hover:text-purple-300'
                           }`}
-                        title="AI 提示词增强"
+                        title={isRequestActive ? '请求进行中，无法优化' : 'AI 提示词增强'}
                       >
                         {isEnhancing ? <Sparkles size={14} className="animate-spin" /> : <Wand2 size={14} />}
                         <span>{isEnhancing ? '优化中...' : '优化'}</span>
@@ -1074,8 +1087,6 @@ const Sidebar: React.FC<SidebarProps> = ({
                     >
                       {isRequestActive ? (
                         <StopIcon size={18} className="text-white" />
-                      ) : isProcessing ? (
-                        <Loader2 size={18} className="animate-spin text-white/70" />
                       ) : (
                         <Send size={18} />
                       )}
