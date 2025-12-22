@@ -157,7 +157,7 @@ const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
 
   if (loading) {
     return (
-      <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center">
+      <div className="fixed inset-0 bg-black/20 backdrop-blur-md z-[100] flex items-center justify-center">
         <div className="bg-slate-900 rounded-xl p-8 flex flex-col items-center gap-4">
           <Loader2 className="w-8 h-8 text-blue-500 animate-spin" />
           <p className="text-slate-400">加载设置中...</p>
@@ -169,8 +169,11 @@ const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
   if (!settings) return null;
 
   return (
-    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-      <div className="bg-slate-900 rounded-xl w-full max-w-4xl max-h-[90vh] flex flex-col shadow-2xl">
+    <div className="fixed inset-0 bg-black/20 backdrop-blur-md z-[100] flex items-center justify-center p-4" onClick={onClose}>
+      <div 
+        className="bg-slate-900 rounded-xl w-full max-w-4xl max-h-[90vh] flex flex-col shadow-2xl relative z-[101]"
+        onClick={(e) => e.stopPropagation()}
+      >
         {/* Header */}
         <div className="flex items-center justify-between p-6 border-b border-slate-800">
           <h2 className="text-2xl font-bold text-slate-200">设置</h2>
