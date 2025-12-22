@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { ChatMessage, CanvasImage, Attachment, ModelSettings, AspectRatio, ImageSize } from '../types';
-import { Send, Bot, Sparkles, X, Paperclip, Edit2, Wand2, Loader2, Plus, ArrowDownLeft, Monitor, Square, RectangleHorizontal, RectangleVertical, Image, Trash2 } from 'lucide-react';
-import { enhancePrompt } from '../services/aiService';
+import { Send, Bot, Sparkles, X, Paperclip, Edit2, Wand2, Loader2, Plus, ArrowDownLeft, Monitor, Square, RectangleHorizontal, RectangleVertical, Image, Trash2, Square as StopIcon } from 'lucide-react';
+import { enhancePrompt, CancellableRequest } from '../services/aiService';
 import { loadChatHistory, saveChatHistory, clearChatHistory } from '../services/historyService';
 import ConfirmDialog from './ConfirmDialog';
 
@@ -54,6 +54,11 @@ const Sidebar: React.FC<SidebarProps> = ({
   const [isEnhancing, setIsEnhancing] = useState(false);
   const [showResPicker, setShowResPicker] = useState(false);
   
+  // 请求状态管理
+  const [currentRequest, setCurrentRequest] = useState<CancellableRequest<string> | null>(null);
+  const [isRequestActive, setIsRequestActive] = useState(false);
+  const currentLoadingIdRef = useRef<string | null>(null); // 当前加载消息的 ID
+  
   const chatEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -65,6 +70,9 @@ const Sidebar: React.FC<SidebarProps> = ({
   // ✅ 添加加载标志，防止重复加载
   const isLoadingHistoryRef = useRef(false);
   const hasLoadedHistoryRef = useRef(false);
+  
+  // 防抖处理：防止快速多次点击
+  const submitDebounceRef = useRef<NodeJS.Timeout | null>(null);
   
   // 确认对话框状态
   const [confirmDialog, setConfirmDialog] = useState<{
@@ -114,7 +122,7 @@ const Sidebar: React.FC<SidebarProps> = ({
               id: '1', 
               role: 'model', 
               type: 'text',
-              text: '欢迎使用绘图小助手。输入提示词即可生成和编辑图片。', 
+              text: '欢迎使用ArtifexBot。输入提示词即可生成和编辑图片。', 
               timestamp: Date.now() 
             }
           ];
@@ -133,7 +141,7 @@ const Sidebar: React.FC<SidebarProps> = ({
             id: '1', 
             role: 'model', 
             type: 'text',
-            text: '欢迎使用绘图小助手。输入提示词即可生成和编辑图片。', 
+            text: '欢迎使用ArtifexBot。输入提示词即可生成和编辑图片。', 
             timestamp: Date.now() 
           }
         ];
@@ -473,51 +481,194 @@ const Sidebar: React.FC<SidebarProps> = ({
 
   // --- Submission Logic ---
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!inputValue.trim() || isProcessing) return;
-
-    const currentInput = inputValue;
-    setInputValue('');
-    
-    // Resolve current attachments to base64 strings for the API
-    const currentBase64s = resolvedAttachments.map(a => a.src);
-
-    // 1. Add User Message
-    addMessage('user', currentInput, 'text', currentBase64s);
-    setAttachments([]); // Clear attachments after use
-
-    // 2. Add Loading Indicator
-    const loadingId = 'loading-' + Date.now();
-    setMessages(prev => [...prev, {
-      id: loadingId,
-      role: 'model',
-      type: 'system',
-      text: '正在生成中...',
-      timestamp: Date.now()
-    }]);
-
-    try {
-      let resultBase64 = '';
-      if (currentBase64s.length > 0) {
-        // Edit/Ref Mode
-        resultBase64 = await onEdit(currentInput, currentBase64s);
-      } else {
-        // Generate Mode
-        resultBase64 = await onGenerate(currentInput);
+  /**
+   * 取消当前请求
+   */
+  const handleCancelRequest = () => {
+    if (currentRequest) {
+      currentRequest.abort();
+      setCurrentRequest(null);
+      setIsRequestActive(false);
+      
+      // 精确移除当前加载指示器
+      const loadingId = currentLoadingIdRef.current;
+      if (loadingId) {
+        setMessages(prev => prev.filter(msg => msg.id !== loadingId));
+        currentLoadingIdRef.current = null;
       }
       
-      // 3. Success: Remove loading and add result message with image
-      setMessages(prev => prev.filter(msg => msg.id !== loadingId));
-      addMessage('model', '生成完成', 'text', [resultBase64]);
-
-    } catch (err) {
-      // 4. Error: Remove loading and add error message
-      setMessages(prev => prev.filter(msg => msg.id !== loadingId));
-      addMessage('model', '抱歉，处理您的请求时出现错误。', 'error');
-      console.error(err);
+      addMessage('model', '请求已取消', 'error');
     }
   };
+
+  /**
+   * 处理提交（带防抖）
+   */
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    
+    // 防抖处理：清除之前的定时器
+    if (submitDebounceRef.current) {
+      clearTimeout(submitDebounceRef.current);
+    }
+    
+    // 如果请求正在进行中，点击按钮应该取消请求
+    if (isRequestActive && currentRequest) {
+      handleCancelRequest();
+      return;
+    }
+    
+    // 防抖：延迟 300ms 执行，防止快速多次点击
+    submitDebounceRef.current = setTimeout(async () => {
+      if (!inputValue.trim() && resolvedAttachments.length === 0) return;
+      // 如果已有请求在进行中，不重复发起
+      if (isRequestActive) return;
+
+      const currentInput = inputValue;
+      setInputValue('');
+      
+      // Resolve current attachments to base64 strings for the API
+      const currentBase64s = resolvedAttachments.map(a => a.src);
+
+      // 1. Add User Message
+      addMessage('user', currentInput, 'text', currentBase64s);
+      setAttachments([]); // Clear attachments after use
+
+      // 2. Add Loading Indicator
+      const loadingId = 'loading-' + Date.now();
+      currentLoadingIdRef.current = loadingId; // 保存当前加载消息 ID
+      setMessages(prev => [...prev, {
+        id: loadingId,
+        role: 'model',
+        type: 'system',
+        text: '正在生成中...',
+        timestamp: Date.now()
+      }]);
+
+      // 3. 创建可取消的请求包装器
+      setIsRequestActive(true);
+      let request: CancellableRequest<string>;
+      let aborted = false;
+      
+      // 创建取消函数
+      const abortController = new AbortController();
+      const abortFn = () => {
+        aborted = true;
+        abortController.abort();
+      };
+      
+      // 包装父组件的 onGenerate/onEdit 调用为可取消的请求
+      if (currentBase64s.length > 0) {
+        // Edit/Ref Mode
+        request = createCancellableRequest(() => {
+          if (aborted) {
+            return Promise.reject(new Error('Request was cancelled'));
+          }
+          return onEdit(currentInput, currentBase64s);
+        });
+      } else {
+        // Generate Mode
+        request = createCancellableRequest(() => {
+          if (aborted) {
+            return Promise.reject(new Error('Request was cancelled'));
+          }
+          return onGenerate(currentInput);
+        });
+      }
+      
+      // 将取消函数绑定到请求对象
+      const originalAbort = request.abort;
+      request.abort = () => {
+        abortFn();
+        originalAbort();
+      };
+      
+      setCurrentRequest(request);
+      
+      try {
+        // 等待请求完成
+        const resultBase64 = await request.promise;
+        
+        // 检查请求是否已被取消
+        if (aborted || request.isAborted()) {
+          // 移除加载指示器（如果还存在）
+          if (currentLoadingIdRef.current === loadingId) {
+            setMessages(prev => prev.filter(msg => msg.id !== loadingId));
+            currentLoadingIdRef.current = null;
+          }
+          return;
+        }
+        
+        // 4. Success: Remove loading and add result message with image
+        if (currentLoadingIdRef.current === loadingId) {
+          setMessages(prev => prev.filter(msg => msg.id !== loadingId));
+          currentLoadingIdRef.current = null;
+        }
+        addMessage('model', '生成完成', 'text', [resultBase64]);
+
+      } catch (err: any) {
+        // 检查是否是取消错误
+        if (aborted || err?.message === 'Request was cancelled' || currentRequest?.isAborted()) {
+          // 移除加载指示器（如果还存在）
+          if (currentLoadingIdRef.current === loadingId) {
+            setMessages(prev => prev.filter(msg => msg.id !== loadingId));
+            currentLoadingIdRef.current = null;
+          }
+          return;
+        }
+        
+        // 5. Error: Remove loading and add error message
+        if (currentLoadingIdRef.current === loadingId) {
+          setMessages(prev => prev.filter(msg => msg.id !== loadingId));
+          currentLoadingIdRef.current = null;
+        }
+        addMessage('model', '抱歉，处理您的请求时出现错误。', 'error');
+        console.error(err);
+      } finally {
+        // 清理请求状态
+        setCurrentRequest(null);
+        setIsRequestActive(false);
+        // 确保清理 loadingId（防止内存泄漏）
+        if (currentLoadingIdRef.current === loadingId) {
+          currentLoadingIdRef.current = null;
+        }
+      }
+    }, 300); // 300ms 防抖延迟
+  };
+  
+  // 辅助函数：创建可取消的请求包装器（简化版本，用于包装父组件函数）
+  const createCancellableRequest = <T,>(requestFn: () => Promise<T>): CancellableRequest<T> => {
+    let aborted = false;
+
+    const abort = () => {
+      aborted = true;
+    };
+
+    const isAborted = () => aborted;
+
+    const promise = requestFn().then((result) => {
+      if (aborted) {
+        throw new Error('Request was cancelled');
+      }
+      return result;
+    }).catch((error) => {
+      if (aborted) {
+        throw new Error('Request was cancelled');
+      }
+      throw error;
+    });
+
+    return { promise, abort, isAborted };
+  };
+  
+  // 清理防抖定时器
+  useEffect(() => {
+    return () => {
+      if (submitDebounceRef.current) {
+        clearTimeout(submitDebounceRef.current);
+      }
+    };
+  }, []);
 
   // 清除聊天历史记录
   const handleClearChatHistory = () => {
@@ -538,7 +689,7 @@ const Sidebar: React.FC<SidebarProps> = ({
               id: '1', 
               role: 'model', 
               type: 'text',
-              text: '欢迎使用绘图小助手。输入提示词即可生成和编辑图片。', 
+              text: '欢迎使用ArtifexBot。输入提示词即可生成和编辑图片。', 
               timestamp: Date.now() 
             }
           ]);
@@ -548,7 +699,7 @@ const Sidebar: React.FC<SidebarProps> = ({
               id: '1',
               role: 'model',
               type: 'text',
-              text: '欢迎使用绘图小助手。输入提示词即可生成和编辑图片。',
+              text: '欢迎使用ArtifexBot。输入提示词即可生成和编辑图片。',
               timestamp: Date.now(),
               images: undefined
             }
@@ -628,7 +779,7 @@ const Sidebar: React.FC<SidebarProps> = ({
                   {/* Model Label (Outside Bubble) */}
                   {msg.role === 'model' && msg.type === 'text' && (
                     <div className="flex items-center gap-2 mb-1.5 ml-1 text-blue-400 text-xs font-bold uppercase tracking-wider opacity-80">
-                      <Bot size={12} /> 绘图小助手
+                      <Bot size={12} /> ArtifexBot
                     </div>
                   )}
 
@@ -902,13 +1053,32 @@ const Sidebar: React.FC<SidebarProps> = ({
 
                     <button
                       type="submit"
-                      disabled={(!inputValue.trim() && resolvedAttachments.length === 0) || isProcessing}
+                      disabled={(!inputValue.trim() && resolvedAttachments.length === 0) && !isRequestActive}
+                      onClick={(e) => {
+                        // 如果请求正在进行中，点击应该取消请求
+                        if (isRequestActive) {
+                          e.preventDefault();
+                          handleCancelRequest();
+                          return;
+                        }
+                        // 否则正常提交
+                        handleSubmit(e);
+                      }}
                       className={`p-2.5 rounded-xl transition-all duration-200 flex items-center justify-center
-                        ${!inputValue.trim() && resolvedAttachments.length === 0 || isProcessing 
+                        ${(!inputValue.trim() && resolvedAttachments.length === 0) && !isRequestActive
                           ? 'bg-slate-800 text-slate-600 cursor-not-allowed' 
+                          : isRequestActive
+                          ? 'bg-red-600 text-white hover:bg-red-500 shadow-lg shadow-red-600/20 transform hover:scale-105 active:scale-95'
                           : 'bg-blue-600 text-white hover:bg-blue-500 shadow-lg shadow-blue-600/20 transform hover:scale-105 active:scale-95'}`}
+                      title={isRequestActive ? '点击取消请求' : '发送请求'}
                     >
-                      {isProcessing ? <Loader2 size={18} className="animate-spin text-white/70" /> : <Send size={18} />}
+                      {isRequestActive ? (
+                        <StopIcon size={18} className="text-white" />
+                      ) : isProcessing ? (
+                        <Loader2 size={18} className="animate-spin text-white/70" />
+                      ) : (
+                        <Send size={18} />
+                      )}
                     </button>
                   </div>
                 </div>

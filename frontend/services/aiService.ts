@@ -12,6 +12,60 @@
 import { GenerateImage, EditMultiImages, EnhancePrompt } from '../wailsjs/go/core/App';
 import { ModelSettings } from '../types';
 
+// ==================== 可取消请求支持 ====================
+
+/**
+ * 可取消的请求结果
+ */
+export interface CancellableRequest<T> {
+  promise: Promise<T>;
+  abort: () => void;
+  isAborted: () => boolean;
+}
+
+/**
+ * 创建可取消的请求包装器
+ * 注意：Wails 调用本身无法直接取消，但可以在 UI 层面标记为已取消并忽略结果
+ */
+function createCancellableRequest<T>(
+  requestFn: () => Promise<T>
+): CancellableRequest<T> {
+  let aborted = false;
+  let abortController: AbortController | null = null;
+
+  const abort = () => {
+    aborted = true;
+    if (abortController) {
+      abortController.abort();
+    }
+  };
+
+  const isAborted = () => aborted;
+
+  const promise = new Promise<T>((resolve, reject) => {
+    // 创建 AbortController 用于标记取消状态
+    abortController = new AbortController();
+
+    requestFn()
+      .then((result) => {
+        if (aborted) {
+          reject(new Error('Request was cancelled'));
+        } else {
+          resolve(result);
+        }
+      })
+      .catch((error) => {
+        if (aborted) {
+          reject(new Error('Request was cancelled'));
+        } else {
+          reject(error);
+        }
+      });
+  });
+
+  return { promise, abort, isAborted };
+}
+
 // ==================== 类型定义 ====================
 
 /**
@@ -83,6 +137,25 @@ export const generateImage = async (
   }
 };
 
+/**
+ * 生成图像（可取消版本）
+ * @param prompt 提示词
+ * @param settings 模型设置（可选）
+ * @param referenceImage 可选的参考图像（base64）
+ * @param sketchImage 可选的草图图像（base64）
+ * @returns 可取消的请求对象
+ */
+export const generateImageCancellable = (
+  prompt: string,
+  settings?: ModelSettings,
+  referenceImage?: string,
+  sketchImage?: string
+): CancellableRequest<string> => {
+  return createCancellableRequest(() => 
+    generateImage(prompt, settings, referenceImage, sketchImage)
+  );
+};
+
 // ==================== 图像编辑 ====================
 
 /**
@@ -128,6 +201,25 @@ export const editMultiImages = async (
     console.error("Image editing failed", error);
     throw error;
   }
+};
+
+/**
+ * 编辑图像（可取消版本）
+ * @param base64Images base64 编码的图像数组（支持单图或多图）
+ * @param prompt 编辑提示词
+ * @param imageSize 图片尺寸，可选值："1K", "2K", "4K"（可选）
+ * @param aspectRatio 宽高比，可选值："1:1", "16:9", "9:16", "3:4", "4:3"（可选）
+ * @returns 可取消的请求对象
+ */
+export const editMultiImagesCancellable = (
+  base64Images: string[],
+  prompt: string,
+  imageSize?: string,
+  aspectRatio?: string
+): CancellableRequest<string> => {
+  return createCancellableRequest(() => 
+    editMultiImages(base64Images, prompt, imageSize, aspectRatio)
+  );
 };
 
 // ==================== 提示词增强 ====================

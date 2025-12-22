@@ -504,7 +504,7 @@ const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
                   </div>
                   <div>
                     <h3 className="text-lg font-semibold text-slate-200">应用信息</h3>
-                    <p className="text-slate-400 text-sm">绘图助手</p>
+                    <p className="text-slate-400 text-sm">ArtifexBot</p>
                   </div>
                 </div>
                 

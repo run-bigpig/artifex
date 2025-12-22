@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Sparkles, Cog, X, Minimize2, Maximize2, Minimize, Minus } from 'lucide-react';
+import { Cog, X, Minimize2, Maximize2, Minimize, Minus } from 'lucide-react';
 import { WindowMinimise, WindowFullscreen, WindowUnfullscreen, WindowIsFullscreen, Quit } from '../wailsjs/runtime/runtime';
 import SettingsComponent from './Settings';
 
@@ -59,9 +59,9 @@ const Header: React.FC<HeaderProps> = ({ onOpenAppSettings }) => {
       >
         <div className="flex items-center gap-2.5 text-slate-100 font-bold text-lg tracking-tight">
           <div className="p-1.5 bg-blue-500/10 rounded-lg">
-            <Sparkles className="text-blue-500" size={18} />
+            <img src="/logo.png" alt="Logo" className="w-[18px] h-[18px]" />
           </div>
-          <span>绘图助手</span>
+          <span>ArtifexBot</span>
         </div>
         
         <div className="flex items-center gap-2">
