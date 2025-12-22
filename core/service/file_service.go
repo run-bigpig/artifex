@@ -50,7 +50,7 @@ func (f *FileService) ExportImage(imageDataURL string, suggestedName string, for
 				ext = ".webp"
 			}
 		}
-		defaultFilename = fmt.Sprintf("artifex-export-%d%s", time.Now().Unix(), ext)
+		defaultFilename = fmt.Sprintf("artifexBot-export-%d%s", time.Now().Unix(), ext)
 	}
 
 	var filePath string

@@ -63,7 +63,7 @@ func (h *HistoryService) Startup(ctx context.Context) error {
 	}
 
 	// 创建应用数据目录（在执行文件所在目录下）
-	h.dataDir = filepath.Join(exeDir, "artifexEditor")
+	h.dataDir = filepath.Join(exeDir, "config")
 	if err := os.MkdirAll(h.dataDir, 0755); err != nil {
 		return fmt.Errorf("failed to create app data dir: %w", err)
 	}

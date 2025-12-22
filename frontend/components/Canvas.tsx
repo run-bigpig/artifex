@@ -624,7 +624,7 @@ const Canvas: React.FC<CanvasProps> = ({
       // 使用 ExportImage 方法导出图片，使用随机文件名
       const now = new Date();
       const formattedDate = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}-${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}${String(now.getSeconds()).padStart(2, '0')}`;
-      const randomName = `artifex-${formattedDate}-${Math.random().toString(36).slice(2, 11)}.png`;
+      const randomName = `artifexBot-${formattedDate}-${Math.random().toString(36).slice(2, 11)}.png`;
       await ExportImage(img.src, randomName, 'png', '');
     } catch (err) {
       console.error('Export failed', err);

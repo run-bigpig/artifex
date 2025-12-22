@@ -47,7 +47,7 @@ const LoadingOverlay: React.FC<LoadingOverlayProps> = ({ isLoading, progress }) 
       <div className="flex flex-col items-center gap-6">
         {/* Logo or App Name */}
         <div className="text-2xl font-bold text-slate-200 mb-2 animate-pulse">
-          Artifex Editor
+          ArtifexBot
         </div>
 
         {/* Loading Spinner */}

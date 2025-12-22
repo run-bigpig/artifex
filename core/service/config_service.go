@@ -1,6 +1,7 @@
 package service
 
 import (
+	"artifex/core/types"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -9,7 +10,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"artifex/core/types"
 	"io"
 	"os"
 	"path/filepath"
@@ -53,7 +53,7 @@ func (c *ConfigService) Startup(ctx context.Context) error {
 	}
 
 	// 创建应用配置目录（在执行文件所在目录下）
-	c.configDir = filepath.Join(exeDir, "artifexEditor")
+	c.configDir = filepath.Join(exeDir, "config")
 
 	if err := os.MkdirAll(c.configDir, 0700); err != nil {
 		return fmt.Errorf("failed to create config dir: %w", err)
@@ -64,7 +64,7 @@ func (c *ConfigService) Startup(ctx context.Context) error {
 	// 生成加密密钥
 	// 使用机器标识 + 固定盐值生成密钥
 	machineID := c.getMachineID()
-	c.encryptionKey = pbkdf2.Key([]byte(machineID), []byte("artifex-ai-editor-salt"), 10000, 32, sha256.New)
+	c.encryptionKey = pbkdf2.Key([]byte(machineID), []byte("artifexBot-salt"), 10000, 32, sha256.New)
 
 	return nil
 }

@@ -34,7 +34,7 @@ type UpdateInfo struct {
 type UpdateProgress struct {
 	Status  string `json:"status"`  // "checking", "downloading", "installing", "completed", "error"
 	Message string `json:"message"` // 状态消息
-	Percent int    `json:"percent"`  // 进度百分比 (0-100)
+	Percent int    `json:"percent"` // 进度百分比 (0-100)
 }
 
 // NewUpdateService 创建更新服务实例
@@ -54,8 +54,19 @@ func (u *UpdateService) Startup(ctx context.Context) {
 // CheckForUpdate 检查是否有可用更新
 func (u *UpdateService) CheckForUpdate() (UpdateInfo, error) {
 	repo := fmt.Sprintf("%s/%s", u.repoOwner, u.repoName)
+
+	// 添加调试信息：打印仓库信息和当前版本
+	fmt.Printf("[UpdateService] Checking for updates from repo: %s, current version: %s\n", repo, u.currentVersion)
+
+	// 获取当前可执行文件名，用于调试
+	exe, err := os.Executable()
+	if err == nil {
+		fmt.Printf("[UpdateService] Current executable: %s\n", exe)
+	}
+
 	latest, found, err := selfupdate.DetectLatest(repo)
 	if err != nil {
+		fmt.Printf("[UpdateService] DetectLatest error: %v\n", err)
 		return UpdateInfo{
 			HasUpdate:      false,
 			CurrentVersion: u.currentVersion,
@@ -64,12 +75,18 @@ func (u *UpdateService) CheckForUpdate() (UpdateInfo, error) {
 	}
 
 	if !found {
+		fmt.Printf("[UpdateService] No release found (found=%v)\n", found)
 		return UpdateInfo{
 			HasUpdate:      false,
 			CurrentVersion: u.currentVersion,
 			LatestVersion:  u.currentVersion,
+			Error:          "未找到 GitHub Release，请检查仓库配置或网络连接",
 		}, nil
 	}
+
+	// 添加调试信息：打印检测到的最新版本
+	fmt.Printf("[UpdateService] Found latest version: %s, URL: %s, AssetURL: %s\n",
+		latest.Version.String(), latest.URL, latest.AssetURL)
 
 	// 解析当前版本并比较
 	currentVer, err := semver.ParseTolerant(u.currentVersion)
@@ -88,6 +105,9 @@ func (u *UpdateService) CheckForUpdate() (UpdateInfo, error) {
 	// 使用 semver 比较版本
 	hasUpdate := latest.Version.GT(currentVer)
 
+	fmt.Printf("[UpdateService] Version comparison: current=%s, latest=%s, hasUpdate=%v\n",
+		currentVer.String(), latest.Version.String(), hasUpdate)
+
 	info := UpdateInfo{
 		HasUpdate:      hasUpdate,
 		CurrentVersion: u.currentVersion,
@@ -98,6 +118,13 @@ func (u *UpdateService) CheckForUpdate() (UpdateInfo, error) {
 	// 始终返回发布说明（如果存在），无论是否有更新
 	if latest.ReleaseNotes != "" {
 		info.ReleaseNotes = latest.ReleaseNotes
+	}
+
+	// 如果没有更新但版本不同，可能是版本号格式问题，添加警告信息
+	if !hasUpdate && latest.Version.String() != u.currentVersion {
+		info.Error = fmt.Sprintf("检测到版本 %s，但版本比较显示无需更新。当前版本: %s",
+			latest.Version.String(), u.currentVersion)
+		fmt.Printf("[UpdateService] Warning: %s\n", info.Error)
 	}
 
 	return info, nil
@@ -127,7 +154,7 @@ func (u *UpdateService) GetCurrentVersion() string {
 // 注意：在 Wails 应用中，更新完成后需要重启应用才能生效
 func (u *UpdateService) Update() error {
 	repo := fmt.Sprintf("%s/%s", u.repoOwner, u.repoName)
-	
+
 	// 检测最新版本
 	latest, found, err := selfupdate.DetectLatest(repo)
 	if err != nil {
@@ -174,12 +201,12 @@ func (u *UpdateService) UpdateWithProgress() (string, error) {
 	}
 
 	repo := fmt.Sprintf("%s/%s", u.repoOwner, u.repoName)
-	
+
 	// 检测最新版本
 	progress.Status = "checking"
 	progress.Message = "正在检测最新版本..."
 	progress.Percent = 10
-	
+
 	latest, found, err := selfupdate.DetectLatest(repo)
 	if err != nil {
 		progress.Status = "error"
@@ -219,7 +246,7 @@ func (u *UpdateService) UpdateWithProgress() (string, error) {
 	progress.Status = "downloading"
 	progress.Message = fmt.Sprintf("正在下载版本 %s...", latest.Version.String())
 	progress.Percent = 30
-	
+
 	exe, err := os.Executable()
 	if err != nil {
 		progress.Status = "error"
@@ -233,7 +260,7 @@ func (u *UpdateService) UpdateWithProgress() (string, error) {
 	progress.Status = "installing"
 	progress.Message = "正在安装更新..."
 	progress.Percent = 70
-	
+
 	if err := selfupdate.UpdateTo(latest.AssetURL, exe); err != nil {
 		progress.Status = "error"
 		progress.Message = fmt.Sprintf("更新失败: %v", err)
@@ -246,7 +273,7 @@ func (u *UpdateService) UpdateWithProgress() (string, error) {
 	progress.Status = "completed"
 	progress.Message = fmt.Sprintf("更新完成！新版本 %s 已安装，请重启应用以使用新版本。", latest.Version.String())
 	progress.Percent = 100
-	
+
 	data, err := json.Marshal(progress)
 	if err != nil {
 		return "", fmt.Errorf("序列化进度信息失败: %w", err)
@@ -261,5 +288,5 @@ func GetExecutableName() string {
 	if runtime.GOOS == "windows" {
 		ext = ".exe"
 	}
-	return fmt.Sprintf("artifex-%s-%s%s", runtime.GOOS, runtime.GOARCH, ext)
+	return fmt.Sprintf("artifexBot-%s-%s%s", runtime.GOOS, runtime.GOARCH, ext)
 }

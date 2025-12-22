@@ -97,7 +97,8 @@ jobs:
         if: ${{ matrix.runner_os == 'Windows' }}
         run: |
           ls -R build || echo "No build dir?"
-          cp build/bin/artifex-ai-editor.exe "artifex-windows-${{ matrix.arch }}.exe"
+          # 使用应用名称作为文件名前缀，以便 selfupdate 库能够正确匹配
+          cp build/bin/artifexBot.exe "artifexBot-windows-${{ matrix.arch }}.exe"
         shell: bash
 
       - name: Upload Windows artifact (exe)
@@ -105,13 +106,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: artifex-windows-${{ matrix.arch }}
-          path: artifex-windows-${{ matrix.arch }}.exe
+          path: artifexBot-windows-${{ matrix.arch }}.exe
 
       - name: Archive Linux build (tar.gz)
         if: ${{ matrix.runner_os == 'Linux' }}
         run: |
           ls -R build || echo "No build dir?"
-          tar -czf "artifex-linux-${{ matrix.arch }}.tar.gz" -C build .
+          # 使用应用名称作为文件名前缀，以便 selfupdate 库能够正确匹配
+          tar -czf "artifexBot-linux-${{ matrix.arch }}.tar.gz" -C build .
         shell: bash
 
       - name: Upload Linux artifact
@@ -119,13 +121,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: artifex-linux-${{ matrix.arch }}
-          path: artifex-linux-${{ matrix.arch }}.tar.gz
+          path: artifexBot-linux-${{ matrix.arch }}.tar.gz
 
       - name: Archive macOS build (zip)
         if: ${{ matrix.runner_os == 'macOS' }}
         run: |
           ls -R build || echo "No build dir?"
-          zip -r "artifex-macos-${{ matrix.arch }}.zip" build
+          # 使用应用名称作为文件名前缀，以便 selfupdate 库能够正确匹配
+          zip -r "artifexBot-macos-${{ matrix.arch }}.zip" build
         shell: bash
 
       - name: Upload macOS artifact
@@ -133,7 +136,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: artifex-macos-${{ matrix.arch }}
-          path: artifex-macos-${{ matrix.arch }}.zip
+          path: artifexBot-macos-${{ matrix.arch }}.zip
 
   release:
     name: Publish Release
