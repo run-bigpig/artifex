@@ -1,0 +1,496 @@
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import { CanvasImage, Viewport, CanvasActionType, Attachment, ModelSettings } from './types';
+import Canvas from './components/Canvas';
+import Sidebar from './components/Sidebar';
+import Header from './components/Header';
+import LoadingOverlay from './components/LoadingOverlay';
+import { generateImage, editMultiImages } from './services/aiService';
+import { loadCanvasHistory, saveCanvasHistory } from './services/historyService';
+import { serializationWorker } from './services/serializationWorker';
+import { ImageIndex, hasImagesChanged } from './utils/imageIndex';
+
+const generateId = () => Math.random().toString(36).substr(2, 9);
+
+// Helper to get image dimensions from base64 string
+const loadImageDimensions = (src: string): Promise<{ width: number; height: number }> => {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve({ width: img.width, height: img.height });
+    img.onerror = (e) => reject(e);
+    img.src = src;
+  });
+};
+
+const App: React.FC = () => {
+  // Application State
+  const [images, setImages] = useState<CanvasImage[]>([]);
+  // Changed from single ID to array of IDs for multi-selection
+  const [selectedImageIds, setSelectedImageIds] = useState<string[]>([]);
+  
+  // Sidebar/Chat State Integration
+  const [sidebarInputValue, setSidebarInputValue] = useState('');
+  
+  // Attachments for Chat
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  
+  const [isProcessing, setIsProcessing] = useState(false);
+  
+  // Model Settings State
+  const [modelSettings, setModelSettings] = useState<ModelSettings>({
+    temperature: 1.0,
+    topP: 0.95,
+    topK: 64,
+    aspectRatio: '1:1',
+    imageSize: '1K'
+  });
+  
+  // Viewport State (Camera)
+  const [viewport, setViewport] = useState<Viewport>({ x: 0, y: 0, zoom: 1 });
+  
+  // 用于跟踪数据变化的 ref
+  const isInitialLoadRef = useRef(true);
+  const prevCanvasDataRef = useRef<{ viewport: Viewport; images: CanvasImage[] } | null>(null);
+  
+  // ✅ 添加加载标志，防止重复加载
+  const isLoadingCanvasHistoryRef = useRef(false);
+  const hasLoadedCanvasHistoryRef = useRef(false);
+  
+  // ✅ 性能优化：使用索引来加速比较和查找
+  // 使用 useMemo 缓存索引，只在 images 变化时重建
+  const imageIndex = useMemo(() => new ImageIndex(images), [images]);
+
+  // 全局加载状态管理
+  const [isLoading, setIsLoading] = useState(true);
+  const [loadProgress, setLoadProgress] = useState({
+    chatLoaded: false,
+    canvasLoaded: false,
+  });
+
+  // Helper to get canvas container dimensions
+  const getCanvasDimensions = () => {
+    // Sidebar is always 420px wide now
+    const sidebarWidth = 420; 
+    const canvasWidth = window.innerWidth - sidebarWidth;
+    const canvasHeight = window.innerHeight;
+    return { width: canvasWidth, height: canvasHeight };
+  };
+
+  // Helper to calculate center of the visible canvas area
+  const getCanvasCenter = (width: number, height: number) => {
+    const { width: canvasWidth, height: canvasHeight } = getCanvasDimensions();
+
+    const centerX = (canvasWidth / 2 - viewport.x) / viewport.zoom;
+    const centerY = (canvasHeight / 2 - viewport.y) / viewport.zoom;
+    
+    return {
+      x: centerX - (width / 2),
+      y: centerY - (height / 2)
+    };
+  };
+
+  // Helper to constrain image size to fit within canvas viewport
+  // Returns constrained dimensions while maintaining aspect ratio
+  const constrainImageSize = (
+    originalWidth: number, 
+    originalHeight: number,
+    maxWidth?: number,
+    maxHeight?: number
+  ): { width: number; height: number } => {
+    // Get canvas dimensions if not provided
+    const { width: canvasWidth, height: canvasHeight } = getCanvasDimensions();
+    
+    // Use provided max dimensions or calculate from canvas (with some padding)
+    // 留出一些边距，确保图片不会紧贴边缘
+    const padding = 40;
+    const effectiveMaxWidth = maxWidth ?? (canvasWidth / viewport.zoom - padding);
+    const effectiveMaxHeight = maxHeight ?? (canvasHeight / viewport.zoom - padding);
+    
+    // Calculate aspect ratio
+    const aspectRatio = originalWidth / originalHeight;
+    
+    let finalWidth = originalWidth;
+    let finalHeight = originalHeight;
+    
+    // Scale down if image exceeds max dimensions
+    if (finalWidth > effectiveMaxWidth || finalHeight > effectiveMaxHeight) {
+      const widthRatio = effectiveMaxWidth / finalWidth;
+      const heightRatio = effectiveMaxHeight / finalHeight;
+      // Use the smaller ratio to ensure both dimensions fit
+      const scaleRatio = Math.min(widthRatio, heightRatio);
+      
+      finalWidth = originalWidth * scaleRatio;
+      finalHeight = originalHeight * scaleRatio;
+    }
+    
+    return { width: finalWidth, height: finalHeight };
+  };
+
+  // Handle actions triggered from the Canvas (Floating Menu)
+  const handleCanvasAction = (id: string, action: CanvasActionType) => {
+    const affectedIds = selectedImageIds.includes(id) ? selectedImageIds : [id];
+
+    // Helper to setup edit mode
+    const setupEdit = (promptText: string) => {
+      const newAttachments: Attachment[] = [];
+      affectedIds.forEach(affectedId => {
+         if (!attachments.some(a => a.type === 'canvas' && a.content === affectedId)) {
+           newAttachments.push({
+             id: generateId(),
+             type: 'canvas',
+             content: affectedId
+           });
+         }
+      });
+      
+      if (newAttachments.length > 0) {
+        setAttachments(prev => [...prev, ...newAttachments]);
+      }
+      if (promptText) {
+        setSidebarInputValue(promptText);
+      }
+    };
+
+    switch (action) {
+      case 'edit':
+        setupEdit('');
+        break;
+      
+      case 'extract_subject':
+        setupEdit('抠图：去除背景，只保留主体 (Remove background, keep subject only)');
+        break;
+      
+      case 'extract_mid':
+        setupEdit('抠图：提取中景元素，去除前景和背景 (Extract midground elements)');
+        break;
+      
+      case 'extract_bg':
+        setupEdit('抠图：去除主体，只保留背景 (Remove subject, keep background only)');
+        break;
+
+      case 'delete':
+        setImages(prev => prev.filter(i => !affectedIds.includes(i.id)));
+        setSelectedImageIds([]);
+        // Also remove from sidebar attachments if they were attached
+        setAttachments(prev => prev.filter(a => !(a.type === 'canvas' && affectedIds.includes(a.content))));
+        break;
+      default:
+        break;
+    }
+  };
+
+  const handleImportImage = async (base64: string, dropX?: number, dropY?: number) => {
+    try {
+      const { width, height } = await loadImageDimensions(base64);
+      
+      // Constrain image size to fit within canvas viewport while maintaining aspect ratio
+      const { width: finalWidth, height: finalHeight } = constrainImageSize(width, height);
+
+      const newId = generateId();
+      
+      let xPos, yPos;
+
+      if (dropX !== undefined && dropY !== undefined) {
+        xPos = dropX - (finalWidth / 2);
+        yPos = dropY - (finalHeight / 2);
+      } else {
+        const center = getCanvasCenter(finalWidth, finalHeight);
+        const offset = images.length * 20; // Stagger slightly if multiple imports
+        xPos = center.x + offset;
+        yPos = center.y + offset;
+      }
+
+      const newImage: CanvasImage = {
+        id: newId,
+        src: base64,
+        x: xPos, 
+        y: yPos,
+        width: finalWidth,
+        height: finalHeight,
+        zIndex: images.length + 1,
+        prompt: '导入的图片'
+      };
+
+      setImages(prev => [...prev, newImage]);
+      // Auto-select imported image
+      setSelectedImageIds([newId]);
+    } catch (e) {
+      console.error("Failed to load image dimensions", e);
+    }
+  };
+
+  const handleGenerate = async (prompt: string): Promise<string> => {
+    setIsProcessing(true);
+    try {
+      // Pass modelSettings here
+      // 生成模式下，aspectRatio 和 imageSize 必须有值，使用默认值
+      const settingsForGenerate: ModelSettings = {
+        ...modelSettings,
+        aspectRatio: modelSettings.aspectRatio || '1:1',
+        imageSize: modelSettings.imageSize || '1K'
+      };
+      const base64 = await generateImage(prompt, settingsForGenerate);
+      const { width, height } = await loadImageDimensions(base64);
+      
+      // Constrain image size to fit within canvas viewport while maintaining aspect ratio
+      const { width: finalWidth, height: finalHeight } = constrainImageSize(width, height);
+      
+      const pos = getCanvasCenter(finalWidth, finalHeight);
+
+      const newImage: CanvasImage = {
+        id: generateId(),
+        src: base64,
+        x: pos.x,
+        y: pos.y,
+        width: finalWidth,
+        height: finalHeight,
+        zIndex: images.length + 1,
+        prompt: prompt
+      };
+
+      setImages(prev => [...prev, newImage]);
+      setSelectedImageIds([newImage.id]);
+      return base64;
+    } catch (error) {
+      console.error(error);
+      throw error;
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const handleEdit = async (prompt: string, base64Sources: string[]): Promise<string> => {
+    if (base64Sources.length === 0) throw new Error("No source images");
+
+    setIsProcessing(true);
+    try {
+      // 使用统一的 editMultiImages 方法（支持单图和多图）
+      // 如果 aspectRatio 或 imageSize 为空字符串，则不传递这些参数（保持原图）
+      const newBase64 = await editMultiImages(
+        base64Sources, 
+        prompt,
+        modelSettings.imageSize || undefined,
+        modelSettings.aspectRatio || undefined
+      );
+      const { width, height } = await loadImageDimensions(newBase64);
+
+      // Constrain image size to fit within canvas viewport while maintaining aspect ratio
+      const { width: finalWidth, height: finalHeight } = constrainImageSize(width, height);
+
+      // Place slightly offset from center to distinguish from original if it was centered
+      const pos = getCanvasCenter(finalWidth, finalHeight);
+
+      const newImage: CanvasImage = {
+        id: generateId(),
+        src: newBase64,
+        width: finalWidth,   
+        height: finalHeight, 
+        x: pos.x + 40,
+        y: pos.y + 40,
+        zIndex: images.length + 2,
+        prompt: prompt
+      };
+
+      setImages(prev => [...prev, newImage]);
+      setSelectedImageIds([newImage.id]);
+      return newBase64;
+    } catch (error) {
+      console.error(error);
+      throw error;
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  // Wrapper for sidebar to add to canvas without coords
+  const handleAddToCanvas = (base64: string) => handleImportImage(base64);
+
+  // ✅ 修复：使用 useCallback 包装回调，避免 Sidebar 的 useEffect 重复执行
+  // 处理聊天历史加载完成回调
+  const handleChatHistoryLoaded = useCallback(() => {
+    setLoadProgress(prev => ({ ...prev, chatLoaded: true }));
+  }, []); // 空依赖数组，确保函数引用稳定
+
+  // ✅ 应用启动时加载画布历史记录（只执行一次）
+  useEffect(() => {
+    // 防止重复加载
+    if (hasLoadedCanvasHistoryRef.current || isLoadingCanvasHistoryRef.current) {
+      return;
+    }
+    
+    isLoadingCanvasHistoryRef.current = true;
+    hasLoadedCanvasHistoryRef.current = true;
+    
+    const loadHistory = async () => {
+      try {
+        const { viewport: savedViewport, images: savedImages } = await loadCanvasHistory();
+        const finalViewport = savedViewport || { x: 0, y: 0, zoom: 1 };
+        const finalImages = savedImages || [];
+        
+        if (finalImages.length > 0) {
+          setImages(finalImages);
+        }
+        if (savedViewport) {
+          setViewport(finalViewport);
+        }
+        
+        // 更新数据快照（在状态更新后）
+        prevCanvasDataRef.current = {
+          viewport: { ...finalViewport },
+          images: finalImages.map(img => ({ ...img }))
+        };
+      } catch (error) {
+        console.error('Failed to load canvas history:', error);
+        // 即使加载失败，也初始化快照为空数据
+        prevCanvasDataRef.current = {
+          viewport: { x: 0, y: 0, zoom: 1 },
+          images: []
+        };
+      } finally {
+        isInitialLoadRef.current = false;
+        isLoadingCanvasHistoryRef.current = false;
+        // 标记画布历史加载完成
+        setLoadProgress(prev => ({ ...prev, canvasLoaded: true }));
+      }
+    };
+    loadHistory();
+    // ✅ 空依赖数组，确保只在组件挂载时执行一次
+  }, []);
+
+  // 当两个历史都加载完成后，移除加载蒙版
+  useEffect(() => {
+    if (loadProgress.chatLoaded && loadProgress.canvasLoaded) {
+      // 添加短暂延迟，确保 UI 更新完成
+      const timer = setTimeout(() => {
+        setIsLoading(false);
+      }, 150); // 150ms 延迟，让用户看到完成状态
+      return () => clearTimeout(timer);
+    }
+    // 注意：不要在这里设置 isLoading 为 true，因为初始状态已经是 true
+  }, [loadProgress.chatLoaded, loadProgress.canvasLoaded]);
+
+  // ✅ 性能优化：使用索引进行快速比较
+  // 使用 ImageIndex 来加速比较，避免 O(n²) 的嵌套循环
+  const prevImageIndexRef = useRef<ImageIndex | null>(null);
+  
+  const hasCanvasDataChanged = (
+    prev: { viewport: Viewport; images: CanvasImage[] } | null,
+    current: { viewport: Viewport; images: CanvasImage[] }
+  ): boolean => {
+    if (!prev) return true;
+
+    // 快速比较 viewport
+    const viewportChanged = 
+      prev.viewport.x !== current.viewport.x ||
+      prev.viewport.y !== current.viewport.y ||
+      prev.viewport.zoom !== current.viewport.zoom;
+
+    // ✅ 使用索引快速比较 images（O(n) 而不是 O(n²)）
+    // 创建当前图片的索引
+    const currentIndex = new ImageIndex(current.images);
+    
+    // 如果之前的索引不存在，创建它
+    if (!prevImageIndexRef.current) {
+      prevImageIndexRef.current = new ImageIndex(prev.images);
+    }
+    
+    // 如果长度不同，直接返回 true
+    if (prev.images.length !== current.images.length) {
+      prevImageIndexRef.current = currentIndex;
+      return true;
+    }
+    
+    // 使用索引比较
+    const imagesChanged = prevImageIndexRef.current.hasChanged(currentIndex);
+    
+    // 更新索引缓存
+    if (imagesChanged) {
+      prevImageIndexRef.current = currentIndex;
+    }
+
+    return viewportChanged || imagesChanged;
+  };
+
+  // 自动保存画布记录（仅在数据实际变化时触发）
+  useEffect(() => {
+    // 初始加载时不保存
+    if (isInitialLoadRef.current) {
+      return;
+    }
+
+    // 获取上一次的数据快照
+    const prevData = prevCanvasDataRef.current;
+    const currentData = { viewport, images };
+
+    // 检查数据是否真正发生变化（使用优化的比较函数）
+    if (!hasCanvasDataChanged(prevData, currentData)) {
+      return;
+    }
+
+    // 数据发生变化，使用防抖保存（已在 historyService 中实现防抖）
+    saveCanvasHistory(viewport, images);
+
+    // 更新数据快照
+    // 注意：虽然比较时跳过了 src，但快照中仍需要保存 src 的引用
+    // 这样可以检测到图片被替换的情况（虽然比较时不会比较 src 内容）
+    prevCanvasDataRef.current = {
+      viewport: { ...viewport },
+      images: images.map(img => ({ ...img }))
+    };
+  }, [viewport, images]);
+
+  // 清理 Worker（组件卸载时）
+  useEffect(() => {
+    return () => {
+      serializationWorker.terminate();
+    };
+  }, []);
+
+  return (
+    <>
+      {/* 全局加载蒙版 */}
+      <LoadingOverlay isLoading={isLoading} progress={loadProgress} />
+
+      <div className="flex flex-col h-screen w-screen bg-slate-950 overflow-hidden font-sans">
+        {/* Header */}
+        <Header onOpenAppSettings={() => {}} />
+        
+        {/* Main Content Area */}
+        <div className="flex flex-1 overflow-hidden pt-16">
+          {/* Sidebar (Left) */}
+          <div className="flex-shrink-0 h-full">
+            <Sidebar 
+              onGenerate={handleGenerate}
+              onEdit={handleEdit}
+              onAddToCanvas={handleAddToCanvas}
+              isProcessing={isProcessing}
+              inputValue={sidebarInputValue}
+              setInputValue={setSidebarInputValue}
+              attachments={attachments}
+              setAttachments={setAttachments}
+              images={images}
+              modelSettings={modelSettings}
+              setModelSettings={setModelSettings}
+              onChatHistoryLoaded={handleChatHistoryLoaded}
+            />
+          </div>
+
+          {/* Main Workspace */}
+          <div className="flex-1 relative h-full">
+            <Canvas 
+              images={images}
+              setImages={setImages}
+              selectedImageIds={selectedImageIds}
+              setSelectedImageIds={setSelectedImageIds}
+              viewport={viewport}
+              setViewport={setViewport}
+              onAction={handleCanvasAction}
+              onImportImage={handleImportImage}
+            />
+          </div>
+        </div>
+      </div>
+    </>
+  );
+};
+
+export default App;
