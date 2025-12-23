@@ -9,8 +9,17 @@
  * API Key 和配置管理由 Go 后端统一处理。
  */
 
-import { GenerateImage, EditMultiImages, EnhancePrompt } from '../wailsjs/go/core/App';
+import { GenerateImage, EditMultiImages, EnhancePrompt, CancelAIRequest } from '../wailsjs/go/core/App';
 import { ModelSettings } from '../types';
+
+// ==================== 请求 ID 生成 ====================
+
+/**
+ * 生成唯一的请求 ID
+ */
+function generateRequestID(): string {
+  return `req-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+}
 
 // ==================== 可取消请求支持 ====================
 
@@ -25,27 +34,29 @@ export interface CancellableRequest<T> {
 
 /**
  * 创建可取消的请求包装器
- * 注意：Wails 调用本身无法直接取消，但可以在 UI 层面标记为已取消并忽略结果
+ * 现在支持真正取消后端请求（通过 context 取消）
  */
 function createCancellableRequest<T>(
-  requestFn: () => Promise<T>
+  requestFn: () => Promise<T>,
+  requestID: string
 ): CancellableRequest<T> {
   let aborted = false;
-  let abortController: AbortController | null = null;
 
-  const abort = () => {
+  const abort = async () => {
+    if (aborted) return;
     aborted = true;
-    if (abortController) {
-      abortController.abort();
+    
+    // 调用后端取消方法
+    try {
+      await CancelAIRequest(requestID);
+    } catch (error) {
+      console.error('Failed to cancel request:', error);
     }
   };
 
   const isAborted = () => aborted;
 
   const promise = new Promise<T>((resolve, reject) => {
-    // 创建 AbortController 用于标记取消状态
-    abortController = new AbortController();
-
     requestFn()
       .then((result) => {
         if (aborted) {
@@ -105,6 +116,7 @@ interface EnhancePromptParams {
  * @param settings 模型设置（可选）
  * @param referenceImage 可选的参考图像（base64）
  * @param sketchImage 可选的草图图像（base64）
+ * @param requestID 请求 ID（可选，如果不提供会自动生成）
  * @returns base64 编码的图像数据
  * @throws 如果生成失败会抛出错误
  */
@@ -112,7 +124,8 @@ export const generateImage = async (
   prompt: string,
   settings?: ModelSettings,
   referenceImage?: string,
-  sketchImage?: string
+  sketchImage?: string,
+  requestID?: string
 ): Promise<string> => {
   try {
     const params: GenerateImageParams = {
@@ -130,7 +143,8 @@ export const generateImage = async (
     }
 
     const paramsJSON = JSON.stringify(params);
-    return await GenerateImage(paramsJSON);
+    const reqID = requestID || generateRequestID();
+    return await GenerateImage(paramsJSON, reqID);
   } catch (error) {
     console.error("Image generation failed", error);
     throw error;
@@ -151,8 +165,10 @@ export const generateImageCancellable = (
   referenceImage?: string,
   sketchImage?: string
 ): CancellableRequest<string> => {
-  return createCancellableRequest(() => 
-    generateImage(prompt, settings, referenceImage, sketchImage)
+  const requestID = generateRequestID();
+  return createCancellableRequest(
+    () => generateImage(prompt, settings, referenceImage, sketchImage, requestID),
+    requestID
   );
 };
 
@@ -166,6 +182,7 @@ export const generateImageCancellable = (
  * @param prompt 编辑提示词
  * @param imageSize 图片尺寸，可选值："1K", "2K", "4K"（可选，仅 Gemini Provider 支持）
  * @param aspectRatio 宽高比，可选值："1:1", "16:9", "9:16", "3:4", "4:3"（可选，仅 Gemini Provider 支持）
+ * @param requestID 请求 ID（可选，如果不提供会自动生成）
  * @returns base64 编码的编辑后图像数据
  * @throws 如果编辑失败会抛出错误
  */
@@ -173,7 +190,8 @@ export const editMultiImages = async (
   base64Images: string[],
   prompt: string,
   imageSize?: string,
-  aspectRatio?: string
+  aspectRatio?: string,
+  requestID?: string
 ): Promise<string> => {
   try {
     if (base64Images.length === 0) {
@@ -195,8 +213,9 @@ export const editMultiImages = async (
     }
 
     const paramsJSON = JSON.stringify(params);
+    const reqID = requestID || generateRequestID();
     // 直接调用后端的 EditMultiImages 方法
-    return await EditMultiImages(paramsJSON);
+    return await EditMultiImages(paramsJSON, reqID);
   } catch (error) {
     console.error("Image editing failed", error);
     throw error;
@@ -217,8 +236,10 @@ export const editMultiImagesCancellable = (
   imageSize?: string,
   aspectRatio?: string
 ): CancellableRequest<string> => {
-  return createCancellableRequest(() => 
-    editMultiImages(base64Images, prompt, imageSize, aspectRatio)
+  const requestID = generateRequestID();
+  return createCancellableRequest(
+    () => editMultiImages(base64Images, prompt, imageSize, aspectRatio, requestID),
+    requestID
   );
 };
 
@@ -230,11 +251,13 @@ export const editMultiImagesCancellable = (
  * 
  * @param prompt 原始提示词
  * @param referenceImages 可选的参考图像数组（base64）
+ * @param requestID 请求 ID（可选，如果不提供会自动生成）
  * @returns 增强后的提示词。如果增强失败，返回原始提示词
  */
 export const enhancePrompt = async (
   prompt: string,
-  referenceImages?: string[]
+  referenceImages?: string[],
+  requestID?: string
 ): Promise<string> => {
   try {
     const params: EnhancePromptParams = {
@@ -246,12 +269,30 @@ export const enhancePrompt = async (
     }
 
     const paramsJSON = JSON.stringify(params);
-    return await EnhancePrompt(paramsJSON);
+    const reqID = requestID || generateRequestID();
+    return await EnhancePrompt(paramsJSON, reqID);
   } catch (error) {
     console.error("Prompt enhancement failed", error);
     // 如果增强失败，返回原始提示词（保持向后兼容）
     return prompt;
   }
+};
+
+/**
+ * 增强提示词（可取消版本）
+ * @param prompt 原始提示词
+ * @param referenceImages 可选的参考图像数组（base64）
+ * @returns 可取消的请求对象
+ */
+export const enhancePromptCancellable = (
+  prompt: string,
+  referenceImages?: string[]
+): CancellableRequest<string> => {
+  const requestID = generateRequestID();
+  return createCancellableRequest(
+    () => enhancePrompt(prompt, referenceImages, requestID),
+    requestID
+  );
 };
 
 

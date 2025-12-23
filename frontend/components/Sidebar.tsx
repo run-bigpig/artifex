@@ -1,7 +1,13 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { ChatMessage, CanvasImage, Attachment, ModelSettings, AspectRatio, ImageSize } from '../types';
 import { Send, Bot, Sparkles, X, Paperclip, Edit2, Wand2, Loader2, Plus, ArrowDownLeft, Monitor, Square, RectangleHorizontal, RectangleVertical, Image, Trash2, Square as StopIcon } from 'lucide-react';
-import { enhancePrompt, CancellableRequest } from '../services/aiService';
+import { 
+  enhancePrompt, 
+  enhancePromptCancellable,
+  CancellableRequest,
+  generateImageCancellable,
+  editMultiImagesCancellable
+} from '../services/aiService';
 import { loadChatHistory, saveChatHistory, clearChatHistory } from '../services/historyService';
 import ConfirmDialog from './ConfirmDialog';
 
@@ -56,6 +62,7 @@ const Sidebar: React.FC<SidebarProps> = ({
   
   // 请求状态管理
   const [currentRequest, setCurrentRequest] = useState<CancellableRequest<string> | null>(null);
+  const [currentEnhanceRequest, setCurrentEnhanceRequest] = useState<CancellableRequest<string> | null>(null);
   const [isRequestActive, setIsRequestActive] = useState(false);
   const currentLoadingIdRef = useRef<string | null>(null); // 当前加载消息的 ID
   
@@ -466,16 +473,37 @@ const Sidebar: React.FC<SidebarProps> = ({
     // 不允许在请求进行中或正在优化时执行
     if ((!inputValue.trim() && resolvedAttachments.length === 0) || isEnhancing || isRequestActive) return;
     
+    // 如果已有增强请求在进行中，取消它
+    if (currentEnhanceRequest) {
+      currentEnhanceRequest.abort();
+      setCurrentEnhanceRequest(null);
+    }
+    
     setIsEnhancing(true);
     try {
       const currentBase64s = resolvedAttachments.map(a => a.src);
-      const enhancedText = await enhancePrompt(inputValue, currentBase64s);
+      // 使用可取消的增强方法
+      const enhanceRequest = enhancePromptCancellable(inputValue, currentBase64s);
+      setCurrentEnhanceRequest(enhanceRequest);
+      
+      const enhancedText = await enhanceRequest.promise;
+      
+      // 检查请求是否已被取消
+      if (enhanceRequest.isAborted()) {
+        return;
+      }
+      
       setInputValue(enhancedText);
-    } catch (err) {
+    } catch (err: any) {
+      // 检查是否是取消错误
+      if (err?.message === 'Request was cancelled' || currentEnhanceRequest?.isAborted()) {
+        return;
+      }
       console.error("Enhance failed", err);
       // Optional: show toast
     } finally {
       setIsEnhancing(false);
+      setCurrentEnhanceRequest(null);
       textareaRef.current?.focus();
     }
   };
@@ -486,6 +514,7 @@ const Sidebar: React.FC<SidebarProps> = ({
    * 取消当前请求
    */
   const handleCancelRequest = () => {
+    // 取消主请求（生成/编辑）
     if (currentRequest) {
       // 先标记为已取消，防止重复取消
       const requestToCancel = currentRequest;
@@ -511,6 +540,13 @@ const Sidebar: React.FC<SidebarProps> = ({
         setMessages(prev => prev.filter(msg => msg.id !== loadingId));
         currentLoadingIdRef.current = null;
       }
+    }
+    
+    // 取消增强请求
+    if (currentEnhanceRequest) {
+      currentEnhanceRequest.abort();
+      setCurrentEnhanceRequest(null);
+      setIsEnhancing(false);
     }
   };
 
@@ -558,43 +594,28 @@ const Sidebar: React.FC<SidebarProps> = ({
         timestamp: Date.now()
       }]);
 
-      // 3. 创建可取消的请求包装器
+      // 3. 创建可取消的请求（使用真正的可取消 AI 服务方法）
       setIsRequestActive(true);
       let request: CancellableRequest<string>;
-      let aborted = false;
       
-      // 创建取消函数
-      const abortController = new AbortController();
-      const abortFn = () => {
-        aborted = true;
-        abortController.abort();
-      };
-      
-      // 包装父组件的 onGenerate/onEdit 调用为可取消的请求
+      // 直接使用可取消的 AI 服务方法，支持真正的后端取消
       if (currentBase64s.length > 0) {
-        // Edit/Ref Mode
-        request = createCancellableRequest(() => {
-          if (aborted) {
-            return Promise.reject(new Error('Request was cancelled'));
-          }
-          return onEdit(currentInput, currentBase64s);
-        });
+        // Edit/Ref Mode - 使用可取消的编辑方法
+        request = editMultiImagesCancellable(
+          currentBase64s,
+          currentInput,
+          modelSettings.imageSize || undefined,
+          modelSettings.aspectRatio || undefined
+        );
       } else {
-        // Generate Mode
-        request = createCancellableRequest(() => {
-          if (aborted) {
-            return Promise.reject(new Error('Request was cancelled'));
-          }
-          return onGenerate(currentInput);
-        });
+        // Generate Mode - 使用可取消的生成方法
+        request = generateImageCancellable(
+          currentInput,
+          modelSettings,
+          undefined, // referenceImage
+          undefined  // sketchImage
+        );
       }
-      
-      // 将取消函数绑定到请求对象
-      const originalAbort = request.abort;
-      request.abort = () => {
-        abortFn();
-        originalAbort();
-      };
       
       setCurrentRequest(request);
       
@@ -603,7 +624,7 @@ const Sidebar: React.FC<SidebarProps> = ({
         const resultBase64 = await request.promise;
         
         // 检查请求是否已被取消
-        if (aborted || request.isAborted()) {
+        if (request.isAborted()) {
           // 移除加载指示器（如果还存在）
           if (currentLoadingIdRef.current === loadingId) {
             setMessages(prev => prev.filter(msg => msg.id !== loadingId));
@@ -617,11 +638,16 @@ const Sidebar: React.FC<SidebarProps> = ({
           setMessages(prev => prev.filter(msg => msg.id !== loadingId));
           currentLoadingIdRef.current = null;
         }
+        
+        // 添加结果到画布
+        onAddToCanvas(resultBase64);
+        
+        // 添加成功消息
         addMessage('model', '生成完成', 'text', [resultBase64]);
 
       } catch (err: any) {
         // 检查是否是取消错误
-        if (aborted || err?.message === 'Request was cancelled' || currentRequest?.isAborted()) {
+        if (request.isAborted() || err?.message === 'Request was cancelled' || currentRequest?.isAborted()) {
           // 移除加载指示器（如果还存在）
           if (currentLoadingIdRef.current === loadingId) {
             setMessages(prev => prev.filter(msg => msg.id !== loadingId));
@@ -649,30 +675,6 @@ const Sidebar: React.FC<SidebarProps> = ({
     }, 300); // 300ms 防抖延迟
   };
   
-  // 辅助函数：创建可取消的请求包装器（简化版本，用于包装父组件函数）
-  const createCancellableRequest = <T,>(requestFn: () => Promise<T>): CancellableRequest<T> => {
-    let aborted = false;
-
-    const abort = () => {
-      aborted = true;
-    };
-
-    const isAborted = () => aborted;
-
-    const promise = requestFn().then((result) => {
-      if (aborted) {
-        throw new Error('Request was cancelled');
-      }
-      return result;
-    }).catch((error) => {
-      if (aborted) {
-        throw new Error('Request was cancelled');
-      }
-      throw error;
-    });
-
-    return { promise, abort, isAborted };
-  };
   
   // 清理防抖定时器
   useEffect(() => {

@@ -1,11 +1,11 @@
 package service
 
 import (
+	"artifex/core/provider"
+	"artifex/core/types"
 	"context"
 	"encoding/json"
 	"fmt"
-	"artifex/core/provider"
-	"artifex/core/types"
 	"sync"
 )
 
@@ -21,6 +21,9 @@ type AIService struct {
 	// 提供商管理
 	providers map[string]provider.AIProvider
 	mu        sync.RWMutex
+
+	// Context 管理器，用于管理每个请求的 context
+	contextManager *ContextManager
 }
 
 // NewAIService 创建 AI 服务实例
@@ -34,6 +37,10 @@ func NewAIService(configService *ConfigService) *AIService {
 // Startup 在应用启动时调用
 func (a *AIService) Startup(ctx context.Context) {
 	a.ctx = ctx
+	// 初始化 Context 管理器
+	a.contextManager = NewContextManager(ctx)
+	// 启动定期清理协程
+	a.contextManager.StartCleanupRoutine()
 }
 
 // ==================== 提供商管理方法 ====================
@@ -181,11 +188,20 @@ func (a *AIService) Close() error {
 
 // GenerateImage 生成图像
 // 返回 base64 编码的图像数据
-func (a *AIService) GenerateImage(paramsJSON string) (string, error) {
+// requestID: 请求 ID，用于管理 context 和取消请求
+func (a *AIService) GenerateImage(paramsJSON string, requestID string) (string, error) {
 	var params types.GenerateImageParams
 	if err := json.Unmarshal([]byte(paramsJSON), &params); err != nil {
 		return "", fmt.Errorf("invalid parameters: %w", err)
 	}
+
+	// 为请求创建独立的 context
+	reqCtx, err := a.contextManager.CreateRequestContext(requestID)
+	if err != nil {
+		return "", fmt.Errorf("failed to create request context: %w", err)
+	}
+	// 请求完成后清理 context
+	defer a.contextManager.CleanupRequest(requestID)
 
 	// 获取当前提供商
 	aiProvider, err := a.getCurrentProvider()
@@ -204,13 +220,14 @@ func (a *AIService) GenerateImage(paramsJSON string) (string, error) {
 		return "", fmt.Errorf("aiProvider %s does not support reference image", aiProvider.Name())
 	}
 
-	// 委托给提供商
-	return aiProvider.GenerateImage(a.ctx, params)
+	// 委托给提供商，使用请求的 context
+	return aiProvider.GenerateImage(reqCtx, params)
 }
 
 // EditMultiImages 编辑图像（支持单图或多图）
 // 统一使用多图编辑方法，即使只有一张图也使用此方法
-func (a *AIService) EditMultiImages(paramsJSON string) (string, error) {
+// requestID: 请求 ID，用于管理 context 和取消请求
+func (a *AIService) EditMultiImages(paramsJSON string, requestID string) (string, error) {
 	var params types.MultiImageEditParams
 	if err := json.Unmarshal([]byte(paramsJSON), &params); err != nil {
 		return "", fmt.Errorf("invalid parameters: %w", err)
@@ -220,6 +237,14 @@ func (a *AIService) EditMultiImages(paramsJSON string) (string, error) {
 	if len(params.Images) < 1 {
 		return "", fmt.Errorf("at least 1 image is required")
 	}
+
+	// 为请求创建独立的 context
+	reqCtx, err := a.contextManager.CreateRequestContext(requestID)
+	if err != nil {
+		return "", fmt.Errorf("failed to create request context: %w", err)
+	}
+	// 请求完成后清理 context
+	defer a.contextManager.CleanupRequest(requestID)
 
 	// 获取当前提供商
 	aiProvider, err := a.getCurrentProvider()
@@ -233,12 +258,21 @@ func (a *AIService) EditMultiImages(paramsJSON string) (string, error) {
 		return "", fmt.Errorf("aiProvider %s does not support image editing", aiProvider.Name())
 	}
 
-	// 使用多图编辑方法
-	return aiProvider.EditMultiImages(a.ctx, params)
+	// 使用多图编辑方法，使用请求的 context
+	return aiProvider.EditMultiImages(reqCtx, params)
 }
 
 // RemoveBackground 移除背景
-func (a *AIService) RemoveBackground(imageData string) (string, error) {
+// requestID: 请求 ID，用于管理 context 和取消请求
+func (a *AIService) RemoveBackground(imageData string, requestID string) (string, error) {
+	// 为请求创建独立的 context
+	reqCtx, err := a.contextManager.CreateRequestContext(requestID)
+	if err != nil {
+		return "", fmt.Errorf("failed to create request context: %w", err)
+	}
+	// 请求完成后清理 context
+	defer a.contextManager.CleanupRequest(requestID)
+
 	// 获取当前提供商
 	aiProvider, err := a.getCurrentProvider()
 	if err != nil {
@@ -257,17 +291,25 @@ func (a *AIService) RemoveBackground(imageData string) (string, error) {
 		Prompt: "Remove the background from this image. Keep the main subject intact with high quality. Return the image with transparent background.",
 	}
 
-	return aiProvider.EditMultiImages(a.ctx, multiParams)
+	return aiProvider.EditMultiImages(reqCtx, multiParams)
 }
-
 
 // EnhancePrompt 增强提示词
 // paramsJSON: JSON 格式的 EnhancePromptParams，包含 prompt 和可选的 referenceImages
-func (a *AIService) EnhancePrompt(paramsJSON string) (string, error) {
+// requestID: 请求 ID，用于管理 context 和取消请求
+func (a *AIService) EnhancePrompt(paramsJSON string, requestID string) (string, error) {
 	var params types.EnhancePromptParams
 	if err := json.Unmarshal([]byte(paramsJSON), &params); err != nil {
 		return "", fmt.Errorf("invalid parameters: %w", err)
 	}
+
+	// 为请求创建独立的 context
+	reqCtx, err := a.contextManager.CreateRequestContext(requestID)
+	if err != nil {
+		return "", fmt.Errorf("failed to create request context: %w", err)
+	}
+	// 请求完成后清理 context
+	defer a.contextManager.CleanupRequest(requestID)
 
 	// 获取当前提供商
 	aiProvider, err := a.getCurrentProvider()
@@ -286,6 +328,14 @@ func (a *AIService) EnhancePrompt(paramsJSON string) (string, error) {
 		return "", fmt.Errorf("aiProvider %s does not support reference images for prompt enhancement", aiProvider.Name())
 	}
 
-	// 委托给提供商
-	return aiProvider.EnhancePrompt(a.ctx, params)
+	// 委托给提供商，使用请求的 context
+	return aiProvider.EnhancePrompt(reqCtx, params)
+}
+
+// CancelRequest 取消指定请求
+func (a *AIService) CancelRequest(requestID string) error {
+	if a.contextManager == nil {
+		return fmt.Errorf("context manager not initialized")
+	}
+	return a.contextManager.CancelRequest(requestID)
 }

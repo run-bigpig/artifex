@@ -1,20 +1,20 @@
 package core
 
 import (
+	"artifex/core/service"
 	"context"
 	"encoding/json"
 	"fmt"
-	"artifex/core/service"
 )
 
 // App struct - 主应用结构
 type App struct {
-	ctx             context.Context
-	fileService     *service.FileService
-	configService   *service.ConfigService
-	aiService       *service.AIService
-	updateService   *service.UpdateService
-	historyService  *service.HistoryService
+	ctx            context.Context
+	fileService    *service.FileService
+	configService  *service.ConfigService
+	aiService      *service.AIService
+	updateService  *service.UpdateService
+	historyService *service.HistoryService
 }
 
 // NewApp creates a new App application struct
@@ -29,11 +29,11 @@ func NewApp() *App {
 	updateService := service.NewUpdateService(RepoOwner, RepoName, Version)
 
 	return &App{
-		fileService:     fileService,
-		configService:   configService,
-		aiService:       aiService,
-		updateService:   updateService,
-		historyService:  historyService,
+		fileService:    fileService,
+		configService:  configService,
+		aiService:      aiService,
+		updateService:  updateService,
+		historyService: historyService,
 	}
 }
 
@@ -103,26 +103,35 @@ func (a *App) LoadSettings() (string, error) {
 // ===== AI 服务方法 =====
 
 // GenerateImage 生成图像
-func (a *App) GenerateImage(paramsJSON string) (string, error) {
-	return a.aiService.GenerateImage(paramsJSON)
+// requestID: 请求 ID，用于管理 context 和取消请求
+func (a *App) GenerateImage(paramsJSON string, requestID string) (string, error) {
+	return a.aiService.GenerateImage(paramsJSON, requestID)
 }
 
 // EditMultiImages 编辑图像（支持单图或多图）
 // 统一使用多图编辑方法，即使只有一张图也使用此方法
-func (a *App) EditMultiImages(paramsJSON string) (string, error) {
-	return a.aiService.EditMultiImages(paramsJSON)
+// requestID: 请求 ID，用于管理 context 和取消请求
+func (a *App) EditMultiImages(paramsJSON string, requestID string) (string, error) {
+	return a.aiService.EditMultiImages(paramsJSON, requestID)
 }
 
 // RemoveBackground 移除背景
-func (a *App) RemoveBackground(imageData string) (string, error) {
-	return a.aiService.RemoveBackground(imageData)
+// requestID: 请求 ID，用于管理 context 和取消请求
+func (a *App) RemoveBackground(imageData string, requestID string) (string, error) {
+	return a.aiService.RemoveBackground(imageData, requestID)
 }
-
 
 // EnhancePrompt 增强提示词
 // paramsJSON: JSON 格式的 EnhancePromptParams，包含 prompt 和可选的 referenceImages
-func (a *App) EnhancePrompt(paramsJSON string) (string, error) {
-	return a.aiService.EnhancePrompt(paramsJSON)
+// requestID: 请求 ID，用于管理 context 和取消请求
+func (a *App) EnhancePrompt(paramsJSON string, requestID string) (string, error) {
+	return a.aiService.EnhancePrompt(paramsJSON, requestID)
+}
+
+// CancelAIRequest 取消 AI 请求
+// requestID: 要取消的请求 ID
+func (a *App) CancelAIRequest(requestID string) error {
+	return a.aiService.CancelRequest(requestID)
 }
 
 // CheckAIProviderAvailability 检测 AI 提供商可用性
