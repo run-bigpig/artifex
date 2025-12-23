@@ -7,7 +7,6 @@ export interface CanvasImage {
   height: number;
   zIndex: number;
   prompt: string;
-  rotation?: number; // 旋转角度（度），默认 0
 }
 
 export type MessageType = 'text' | 'system' | 'error';

@@ -264,7 +264,7 @@ func rewritePromptIfNeeded(prompt string) string {
 	for _, keyword := range enhanceKeywords {
 		if strings.Contains(lowerPrompt, strings.ToLower(keyword)) {
 			// 追加 upscale 提示
-			upscalePrompt := "\n\nPrompt: Upscale to 4K\n\nInput: 150 × 150\n\nOutput: 4096 × 4096"
+			upscalePrompt := "High-quality upscale and remaster of the original source image. Apply strong deblurring and denoising functions to achieve pristine clarity. Focus on sharpening edges and enhancing the definition of textures and structural details. Restore intricate fine details appropriate to the subject matter (e.g., skin texture in portraits, foliage in landscapes, brushstrokes in artwork). Ensure the image is clean with no grain or JPEG artifacts, strictly preserving the integrity of the original visual style (photographic, painterly, or rendered), rendered in extremely clear 4K resolution"
 			return upscalePrompt
 		}
 	}
@@ -273,7 +273,7 @@ func rewritePromptIfNeeded(prompt string) string {
 	for _, keyword := range expandKeywords {
 		if strings.Contains(lowerPrompt, strings.ToLower(keyword)) {
 			// 扩图提示词重写：强调扩展画布并保持原图内容
-			expandPrompt := "\n\nPrompt: Expand the image canvas while maintaining the original image content. Extend the image boundaries naturally and seamlessly."
+			expandPrompt := "Perform universal image outpainting. Ignore the surrounding white borders, treating them as blank areas to be filled. Automatically analyze and match the visual style, texture, grain, and lighting conditions of the core image. Whether photorealistic, digital painting, or artistic, strictly maintain consistency with the source. Seamlessly extend the background and environment outwards, ensuring the newly generated parts blend perfectly with the original, with no visible seams or style mismatch."
 			return expandPrompt
 		}
 	}

@@ -1,135 +1,21 @@
 import React, { useRef, useState, useEffect, useCallback, useMemo } from 'react';
 import { CanvasImage, Point, Viewport, CanvasActionType, ExpandOffsets } from '../types';
-import { Move, ZoomIn, ZoomOut, Trash2, Edit, Upload, Copy, Check, MousePointer2, Scissors, Sparkles, Maximize2, RotateCw } from 'lucide-react';
+import { Move, ZoomIn, ZoomOut, Trash2, Edit, Upload, Copy, Check, MousePointer2, Scissors, Sparkles, Maximize2 } from 'lucide-react';
 import { ExportImage } from '../wailsjs/go/core/App';
 import { v4 as uuidv4 } from 'uuid';
-import { ImageIndex } from '../utils/imageIndex'; 
+import { ImageIndex } from '../utils/imageIndex';
+import {
+  getPngBlob,
+  createDragPreviewThumbnailSync,
+  generateExpandedImage,
+  calculateZoomViewport,
+  clamp,
+} from '../utils/canvasUtils';
 
+/**
+ * 生成唯一 ID
+ */
 const generateId = () => Math.random().toString(36).substr(2, 9);
-
-// 计算旋转后的边界框
-// 返回旋转后的边界框的宽度、高度和中心点偏移
-const getRotatedBounds = (width: number, height: number, rotation: number) => {
-  const rad = (rotation * Math.PI) / 180;
-  const cos = Math.abs(Math.cos(rad));
-  const sin = Math.abs(Math.sin(rad));
-  
-  // 旋转后的边界框尺寸
-  const rotatedWidth = width * cos + height * sin;
-  const rotatedHeight = width * sin + height * cos;
-  
-  // 中心点偏移（相对于原始左上角）
-  const centerOffsetX = (rotatedWidth - width) / 2;
-  const centerOffsetY = (rotatedHeight - height) / 2;
-  
-  return {
-    width: rotatedWidth,
-    height: rotatedHeight,
-    offsetX: centerOffsetX,
-    offsetY: centerOffsetY
-  };
-};
-
-// 将屏幕坐标转换为图片局部坐标系（考虑旋转）
-const screenToLocal = (screenX: number, screenY: number, imgX: number, imgY: number, imgWidth: number, imgHeight: number, rotation: number, viewport: Viewport) => {
-  // 先转换为画布世界坐标
-  const worldX = (screenX - viewport.x) / viewport.zoom;
-  const worldY = (screenY - viewport.y) / viewport.zoom;
-  
-  // 转换为相对于图片中心的坐标
-  const centerX = imgX + imgWidth / 2;
-  const centerY = imgY + imgHeight / 2;
-  const localX = worldX - centerX;
-  const localY = worldY - centerY;
-  
-  // 反向旋转
-  const rad = (-rotation * Math.PI) / 180;
-  const cos = Math.cos(rad);
-  const sin = Math.sin(rad);
-  
-  const rotatedX = localX * cos - localY * sin;
-  const rotatedY = localX * sin + localY * cos;
-  
-  return {
-    x: rotatedX + imgWidth / 2,
-    y: rotatedY + imgHeight / 2
-  };
-};
-
-// Helper to ensure we get a PNG blob for clipboard compatibility
-const getPngBlob = (src: string): Promise<Blob> => {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => {
-      const canvas = document.createElement('canvas');
-      canvas.width = img.naturalWidth;
-      canvas.height = img.naturalHeight;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) {
-        reject(new Error("Context creation failed")); 
-        return;
-      }
-      ctx.drawImage(img, 0, 0);
-      canvas.toBlob((blob) => {
-        if (blob) {
-          resolve(blob);
-        } else {
-          reject(new Error("Blob creation failed"));
-        }
-      }, 'image/png');
-    };
-    img.onerror = () => reject(new Error("Image load failed"));
-    img.src = src;
-  });
-};
-
-// Helper to create a thumbnail drag preview image synchronously
-// 返回 Canvas 元素，可以直接用作 drag image（不需要等待加载）
-const createDragPreviewThumbnailSync = (img: HTMLImageElement, size: number = 64): HTMLCanvasElement => {
-  // 创建 Canvas 来生成缩略图
-  const canvas = document.createElement('canvas');
-  canvas.width = size;
-  canvas.height = size;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) {
-    throw new Error("Context creation failed");
-  }
-  
-  // 计算缩放比例，保持宽高比，使用 cover 模式（居中裁剪）
-  const imgAspect = img.naturalWidth / img.naturalHeight;
-  
-  let drawWidth = size;
-  let drawHeight = size;
-  let drawX = 0;
-  let drawY = 0;
-  
-  if (imgAspect > 1) {
-    // 图片更宽，以高度为准
-    drawHeight = size;
-    drawWidth = size * imgAspect;
-    drawX = (size - drawWidth) / 2;
-  } else {
-    // 图片更高，以宽度为准
-    drawWidth = size;
-    drawHeight = size / imgAspect;
-    drawY = (size - drawHeight) / 2;
-  }
-  
-  // 填充背景色（使用半透明黑色）
-  ctx.fillStyle = 'rgba(0, 0, 0, 0.1)';
-  ctx.fillRect(0, 0, size, size);
-  
-  // 绘制图片（居中裁剪）
-  ctx.drawImage(img, drawX, drawY, drawWidth, drawHeight);
-  
-  // 添加边框
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
-  ctx.lineWidth = 1;
-  ctx.strokeRect(0.5, 0.5, size - 1, size - 1);
-  
-  // 直接返回 Canvas 元素，setDragImage 支持 Canvas
-  return canvas;
-};
 
 interface CanvasProps {
   images: CanvasImage[];
@@ -187,6 +73,42 @@ const Canvas: React.FC<CanvasProps> = ({
     setShowExtractMenu(false);
   }, [selectedImageIds]);
 
+  // 当选中图片时，自动将选中的图片提升到最上层
+  useEffect(() => {
+    if (selectedImageIds.length === 0) return;
+
+    setImages(prev => {
+      // 获取当前所有图片的最大 zIndex
+      const maxZIndex = prev.length > 0 
+        ? Math.max(...prev.map(img => img.zIndex), 0)
+        : 0;
+
+      // 检查是否有选中的图片需要更新 zIndex
+      const needsUpdate = prev.some(img => {
+        const index = selectedImageIds.indexOf(img.id);
+        return index !== -1 && img.zIndex !== maxZIndex + index + 1;
+      });
+
+      // 如果没有需要更新的，直接返回原数组（避免不必要的状态更新）
+      if (!needsUpdate) return prev;
+
+      // 更新选中图片的 zIndex，使其在最上层
+      // 多个图片选中时，按选中顺序设置 zIndex，最后选中的在最上层
+      return prev.map(img => {
+        const index = selectedImageIds.indexOf(img.id);
+        if (index !== -1) {
+          // 选中的图片：根据在选中数组中的位置设置 zIndex
+          // 最后选中的图片（数组最后一个）zIndex 最大
+          return {
+            ...img,
+            zIndex: maxZIndex + index + 1
+          };
+        }
+        return img;
+      });
+    });
+  }, [selectedImageIds]); // 只依赖 selectedImageIds，在 setImages 内部获取最新的 images 状态
+
   // 扩图模式状态（需要在 useEffect 之前声明）
   const [expandingImageId, setExpandingImageId] = useState<string | null>(null);
   const [expandOffsets, setExpandOffsets] = useState<ExpandOffsets>({ top: 0, right: 0, bottom: 0, left: 0 });
@@ -205,33 +127,126 @@ const Canvas: React.FC<CanvasProps> = ({
   const selectedImageIdsSet = useMemo(() => new Set(selectedImageIds), [selectedImageIds]);
 
   // --- Unified Copy Logic ---
-  const handleCopyImages = async (targetIds: string[]) => {
-    // ✅ 使用索引批量查找，O(n) 而不是 O(n²)
-    const targets = imageIndex.getMany(targetIds);
-    if (targets.length === 0) return;
-
-    // 1. Update Internal Clipboard
-    setInternalClipboard(targets);
-
-    // 2. Update System Clipboard (Primary image only)
-    const primaryImg = targets[targets.length - 1];
-    
+  /**
+   * 复制图片到剪贴板
+   * @param targetIds 要复制的图片 ID 数组
+   */
+  const handleCopyImages = useCallback(async (targetIds: string[]) => {
     try {
-      const blob = await getPngBlob(primaryImg.src);
-      await navigator.clipboard.write([
-        new ClipboardItem({ 'image/png': blob })
-      ]);
-    } catch (err) {
-      console.warn('System clipboard write failed (internal copy still worked)', err);
-    }
+      // ✅ 使用索引批量查找，O(n) 而不是 O(n²)
+      const targets = imageIndex.getMany(targetIds);
+      if (targets.length === 0) {
+        console.warn('没有找到要复制的图片');
+        return;
+      }
 
-    // 3. Visual Feedback
-    setCopiedId(primaryImg.id);
-    setTimeout(() => setCopiedId(null), 2000);
-  };
+      // 1. 更新内部剪贴板
+      setInternalClipboard(targets);
+
+      // 2. 更新系统剪贴板（仅主图片）
+      const primaryImg = targets[targets.length - 1];
+      
+      try {
+        const blob = await getPngBlob(primaryImg.src);
+        await navigator.clipboard.write([
+          new ClipboardItem({ 'image/png': blob })
+        ]);
+      } catch (err) {
+        // 系统剪贴板写入失败不影响内部复制功能
+        console.warn('系统剪贴板写入失败（内部复制仍可用）:', err);
+      }
+
+      // 3. 视觉反馈
+      setCopiedId(primaryImg.id);
+      // 使用定时器显示复制成功提示，2秒后自动清除
+      const timer = setTimeout(() => setCopiedId(null), 2000);
+      // 注意：这里不需要清理定时器，因为组件卸载时会自动清理状态
+    } catch (error) {
+      console.error('复制图片失败:', error);
+    }
+  }, [imageIndex]);
+
+  /**
+   * 从系统剪贴板粘贴图片
+   */
+  const handlePasteFromClipboard = useCallback(async () => {
+    try {
+      // 读取剪贴板内容
+      const clipboardItems = await navigator.clipboard.read();
+      
+      // 查找图片类型的剪贴板项
+      for (const item of clipboardItems) {
+        // 检查是否有图片类型
+        const imageTypes = item.types.filter(type => type.startsWith('image/'));
+        
+        if (imageTypes.length > 0) {
+          // 获取第一个图片类型
+          const imageType = imageTypes[0];
+          const blob = await item.getType(imageType);
+          
+          // 将 Blob 转换为 base64
+          const reader = new FileReader();
+          reader.onload = (ev) => {
+            try {
+              const base64 = ev.target?.result as string;
+              if (base64) {
+                // 添加到画布中心位置
+                onImportImage(base64);
+              }
+            } catch (error) {
+              console.error('处理剪贴板图片失败:', error);
+            }
+          };
+          reader.onerror = () => {
+            console.error('读取剪贴板图片失败');
+          };
+          reader.readAsDataURL(blob);
+          
+          // 只处理第一个图片
+          return;
+        }
+      }
+      
+      // 如果没有找到图片，尝试读取文本（可能是图片 URL）
+      const textTypes = clipboardItems.flatMap(item => 
+        item.types.filter(type => type === 'text/plain')
+      );
+      
+      if (textTypes.length > 0) {
+        const firstItem = clipboardItems.find(item => 
+          item.types.includes('text/plain')
+        );
+        if (firstItem) {
+          const text = await firstItem.getType('text/plain');
+          const textContent = await text.text();
+          
+          // 检查是否是图片 URL（data URL 或 http/https URL）
+          if (textContent.startsWith('data:image/') || 
+              textContent.match(/^https?:\/\/.+\.(jpg|jpeg|png|gif|webp|bmp)/i)) {
+            // 如果是 data URL，直接使用
+            if (textContent.startsWith('data:image/')) {
+              onImportImage(textContent);
+            } else {
+              // 如果是 http/https URL，需要先加载图片
+              // 注意：由于跨域限制，可能需要后端代理
+              console.warn('暂不支持从 URL 粘贴图片，请使用图片文件或截图');
+            }
+          }
+        }
+      }
+    } catch (error) {
+      // 剪贴板读取失败（可能是权限问题或剪贴板中没有图片）
+      // 静默失败，不显示错误提示
+      console.debug('无法从剪贴板读取图片:', error);
+    }
+  }, [onImportImage]);
 
   // --- Keyboard Shortcuts ---
-  const handleKeyDown = (e: React.KeyboardEvent) => {
+  /**
+   * 处理键盘快捷键
+   * 支持删除、复制、粘贴、复制、全选等操作
+   */
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     // Delete
     if (e.key === 'Delete' || e.key === 'Backspace') {
       if (selectedImageIds.length > 0) {
@@ -250,9 +265,10 @@ const Canvas: React.FC<CanvasProps> = ({
 
     // Paste (Ctrl+V)
     if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
+      e.preventDefault();
+      
+      // 1. 优先处理内部剪贴板（画布内复制的图片）
       if (internalClipboard.length > 0) {
-        e.preventDefault();
-        
         const newImages = internalClipboard.map(img => ({
           ...img,
           id: generateId(),
@@ -266,6 +282,9 @@ const Canvas: React.FC<CanvasProps> = ({
 
         setImages(prev => [...prev, ...newImages]);
         setSelectedImageIds(newImages.map(img => img.id));
+      } else {
+        // 2. 如果没有内部剪贴板，尝试从系统剪贴板读取图片
+        handlePasteFromClipboard();
       }
     }
 
@@ -299,9 +318,13 @@ const Canvas: React.FC<CanvasProps> = ({
       // ✅ 使用索引获取所有 id，已按 zIndex 排序
       setSelectedImageIds(imageIndex.getAllIds());
     }
-  };
+  }, [selectedImageIds, internalClipboard, images, imageIndex, handleCopyImages, handlePasteFromClipboard, setImages, setSelectedImageIds]);
 
   // --- Wheel Zoom ---
+  /**
+   * 处理鼠标滚轮缩放
+   * 使用工具函数优化坐标转换和缩放计算
+   */
   const handleWheel = useCallback((e: WheelEvent) => {
     const container = containerRef.current;
     if (!container) return;
@@ -316,7 +339,6 @@ const Canvas: React.FC<CanvasProps> = ({
     const mouseY = e.clientY - rect.top;
     
     // 计算鼠标指向的画布世界坐标（缩放前的世界坐标）
-    // 公式：worldX = (screenX - viewport.x) / viewport.zoom
     const worldX = (mouseX - viewport.x) / viewport.zoom;
     const worldY = (mouseY - viewport.y) / viewport.zoom;
     
@@ -324,19 +346,16 @@ const Canvas: React.FC<CanvasProps> = ({
     // 优化缩放步进值：使用更小的灵敏度，使缩放更平滑可控（约 5% 步进）
     const zoomSensitivity = 0.0003;
     const zoomDelta = -e.deltaY * zoomSensitivity;
-    const newZoom = Math.min(Math.max(viewport.zoom + zoomDelta, 0.1), 5);
+    const newZoom = clamp(viewport.zoom + zoomDelta, 0.1, 5);
     
-    // 调整视口位置，使得缩放前后鼠标指向的世界坐标点在屏幕上的位置保持不变
-    // 公式：newViewport.x = mouseX - worldX * newZoom
-    // 这确保了缩放前后，鼠标指向的世界坐标点在屏幕上的位置不变
-    const newX = mouseX - worldX * newZoom;
-    const newY = mouseY - worldY * newZoom;
+    // 使用工具函数计算新的视口位置
+    const newViewport = calculateZoomViewport(mouseX, mouseY, worldX, worldY, newZoom);
     
     setViewport(prev => ({
       ...prev,
       zoom: newZoom,
-      x: newX,
-      y: newY
+      x: newViewport.x,
+      y: newViewport.y
     }));
   }, [viewport, setViewport]);
 
@@ -551,7 +570,11 @@ const Canvas: React.FC<CanvasProps> = ({
     }
   };
 
-  const handleMouseUp = () => {
+  /**
+   * 处理鼠标抬起事件
+   * 重置所有拖拽和调整大小状态
+   */
+  const handleMouseUp = useCallback(() => {
     setIsDraggingCanvas(false);
     setIsDraggingImage(false);
     setIsResizing(false);
@@ -564,10 +587,16 @@ const Canvas: React.FC<CanvasProps> = ({
     if (!altKeyPressedRef.current) {
       setIsDragOutMode(false);
     }
-  };
+  }, []);
 
   // --- Drag Image to Sidebar ---
-  const handleImageDragStart = (e: React.DragEvent, img: CanvasImage) => {
+  /**
+   * 处理图片拖拽开始事件（拖出到侧边栏）
+   * 仅在 Alt 键按下时允许拖出操作
+   * @param e 拖拽事件
+   * @param img 要拖拽的图片
+   */
+  const handleImageDragStart = useCallback((e: React.DragEvent, img: CanvasImage) => {
     // 检查 Alt 键是否按下（通过 ref 和事件对象双重检查）
     const isAltPressed = altKeyPressedRef.current || e.altKey;
     
@@ -651,7 +680,7 @@ const Canvas: React.FC<CanvasProps> = ({
       }
     } catch (error) {
       // 如果缩略图创建失败，创建一个简单的占位符
-      console.error('Failed to create drag preview thumbnail:', error);
+      console.error('创建拖拽预览缩略图失败:', error);
       const placeholder = document.createElement('div');
       placeholder.style.width = '64px';
       placeholder.style.height = '64px';
@@ -679,12 +708,16 @@ const Canvas: React.FC<CanvasProps> = ({
     
     // 取消图片移动拖拽，避免冲突
     setIsDraggingImage(false);
-  };
+  }, []);
 
-  const handleImageDragEnd = (e: React.DragEvent) => {
+  /**
+   * 处理图片拖拽结束事件
+   * @param e 拖拽事件
+   */
+  const handleImageDragEnd = useCallback((e: React.DragEvent) => {
     e.stopPropagation();
     setIsDraggingToSidebar(false);
-  };
+  }, []);
 
   // --- Actions ---
 
@@ -711,64 +744,17 @@ const Canvas: React.FC<CanvasProps> = ({
     }
   };
 
-  // 处理图片旋转
-  const handleRotate = (e: React.MouseEvent, imageId: string) => {
-    e.stopPropagation();
-    
-    // 如果当前图片被选中，旋转所有选中的图片；否则只旋转当前图片
-    const targetIds = selectedImageIds.includes(imageId) ? selectedImageIds : [imageId];
-    
-    setImages(prev => prev.map(img => {
-      if (targetIds.includes(img.id)) {
-        // 每次旋转 90 度
-        const currentRotation = img.rotation || 0;
-        const newRotation = (currentRotation + 90) % 360;
-        return { ...img, rotation: newRotation };
-      }
-      return img;
-    }));
-  };
 
-  // 生成带白边画布的图片
-  const generateExpandedImage = async (img: CanvasImage, offsets: ExpandOffsets): Promise<string> => {
-    return new Promise((resolve, reject) => {
-      const imageElement = new Image();
-      imageElement.onload = () => {
-        // 计算新画布的尺寸
-        const newWidth = imageElement.naturalWidth + offsets.left + offsets.right;
-        const newHeight = imageElement.naturalHeight + offsets.top + offsets.bottom;
-        
-        // 创建 Canvas
-        const canvas = document.createElement('canvas');
-        canvas.width = newWidth;
-        canvas.height = newHeight;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) {
-          reject(new Error('Failed to get canvas context'));
-          return;
-        }
-        
-        // 填充白色背景
-        ctx.fillStyle = '#FFFFFF';
-        ctx.fillRect(0, 0, newWidth, newHeight);
-        
-        // 绘制原图到新位置（考虑偏移量）
-        ctx.drawImage(
-          imageElement,
-          offsets.left,
-          offsets.top,
-          imageElement.naturalWidth,
-          imageElement.naturalHeight
-        );
-        
-        // 转换为 base64
-        const base64 = canvas.toDataURL('image/png');
-        resolve(base64);
-      };
-      imageElement.onerror = () => reject(new Error('Failed to load image'));
-      imageElement.src = img.src;
-    });
-  };
+  // 生成带白边画布的图片（使用工具函数）
+  // 注意：这里保留一个包装函数以保持接口一致性
+  const generateExpandedImageLocal = useCallback(async (img: CanvasImage, offsets: ExpandOffsets): Promise<string> => {
+    try {
+      return await generateExpandedImage(img.src, offsets);
+    } catch (error) {
+      console.error('生成扩展图片失败:', error);
+      throw error;
+    }
+  }, []);
 
   // 处理扩图控制点拖动开始
   const handleExpandHandleMouseDown = (e: React.MouseEvent, handleType: string) => {
@@ -788,31 +774,25 @@ const Canvas: React.FC<CanvasProps> = ({
     if (!expandingImg) return;
 
     const handleMouseMove = (e: MouseEvent) => {
-      // 将屏幕坐标转换为图片局部坐标系（考虑旋转）
-      const rotation = expandingImg.rotation || 0;
-      const startLocal = screenToLocal(
-        dragStartPoint.x,
-        dragStartPoint.y,
-        expandingImg.x,
-        expandingImg.y,
-        expandingImg.width,
-        expandingImg.height,
-        rotation,
-        viewport
-      );
-      const currentLocal = screenToLocal(
-        e.clientX,
-        e.clientY,
-        expandingImg.x,
-        expandingImg.y,
-        expandingImg.width,
-        expandingImg.height,
-        rotation,
-        viewport
-      );
+      // 将屏幕坐标转换为容器局部坐标系（简化版：容器不旋转，直接转换）
+      // 由于容器不再旋转，可以直接使用简单的坐标转换，无需考虑旋转
+      const containerRect = containerRef.current?.getBoundingClientRect();
+      if (!containerRect) return;
       
-      const deltaX = currentLocal.x - startLocal.x;
-      const deltaY = currentLocal.y - startLocal.y;
+      // 计算相对于容器的坐标
+      const startContainerX = (dragStartPoint.x - containerRect.left - viewport.x) / viewport.zoom;
+      const startContainerY = (dragStartPoint.y - containerRect.top - viewport.y) / viewport.zoom;
+      const currentContainerX = (e.clientX - containerRect.left - viewport.x) / viewport.zoom;
+      const currentContainerY = (e.clientY - containerRect.top - viewport.y) / viewport.zoom;
+      
+      // 转换为相对于图片左上角的局部坐标
+      const startLocalX = startContainerX - expandingImg.x;
+      const startLocalY = startContainerY - expandingImg.y;
+      const currentLocalX = currentContainerX - expandingImg.x;
+      const currentLocalY = currentContainerY - expandingImg.y;
+      
+      const deltaX = currentLocalX - startLocalX;
+      const deltaY = currentLocalY - startLocalY;
 
       const newOffsets = { ...expandStartOffsets };
 
@@ -894,7 +874,12 @@ const Canvas: React.FC<CanvasProps> = ({
     };
   }, [isDraggingExpandHandle, draggingHandleType, dragStartPoint, expandStartOffsets, expandOffsets, viewport, expandingImageId, images]);
 
-  const handleExport = async (e: React.MouseEvent, img: CanvasImage) => {
+  /**
+   * 导出图片到文件系统
+   * @param e 鼠标事件
+   * @param img 要导出的图片
+   */
+  const handleExport = useCallback(async (e: React.MouseEvent, img: CanvasImage) => {
     e.stopPropagation();
     try {
       // 使用 ExportImage 方法导出图片，使用随机文件名
@@ -903,12 +888,16 @@ const Canvas: React.FC<CanvasProps> = ({
       const randomName = `artifexBot-${formattedDate}-${Math.random().toString(36).slice(2, 11)}.png`;
       await ExportImage(img.src, randomName, 'png', '');
     } catch (err) {
-      console.error('Export failed', err);
+      console.error('导出图片失败:', err);
     }
-  };
+  }, []);
 
   // --- Drag & Drop Import ---
-  const handleDragOver = (e: React.DragEvent) => {
+  /**
+   * 处理拖拽悬停事件
+   * 检查是否为画布图片拖拽，避免触发文件上传
+   */
+  const handleDragOver = useCallback((e: React.DragEvent) => {
     // 检查是否是从画布拖拽的图片（Alt键拖拽到侧边栏）
     // application/canvas-image 是画布图片拖拽的唯一标识
     // 如果是从画布拖拽的图片，不应该触发文件上传功能
@@ -921,9 +910,12 @@ const Canvas: React.FC<CanvasProps> = ({
     
     e.preventDefault();
     setIsDragOver(true);
-  };
+  }, []);
   
-  const handleDragLeave = (e: React.DragEvent) => {
+  /**
+   * 处理拖拽离开事件
+   */
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
     // 检查是否是从画布拖拽的图片
     const isCanvasImageDrag = e.dataTransfer.types.includes('application/canvas-image');
     
@@ -934,9 +926,13 @@ const Canvas: React.FC<CanvasProps> = ({
     
     e.preventDefault();
     setIsDragOver(false);
-  };
+  }, []);
   
-  const handleDrop = (e: React.DragEvent) => {
+  /**
+   * 处理文件拖拽放置事件
+   * 支持从文件系统拖拽图片到画布
+   */
+  const handleDrop = useCallback((e: React.DragEvent) => {
     // 检查是否是从画布拖拽的图片（Alt键拖拽到侧边栏）
     // 如果是从画布拖拽的图片，不应该触发文件上传功能
     const canvasImageId = e.dataTransfer.getData('application/canvas-image');
@@ -953,23 +949,43 @@ const Canvas: React.FC<CanvasProps> = ({
     
     // 只有真正的文件拖拽才处理上传
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      const files = Array.from(e.dataTransfer.files);
-      const rect = containerRef.current?.getBoundingClientRect();
-      if (!rect) return;
-      const dropX = (e.clientX - rect.left - viewport.x) / viewport.zoom;
-      const dropY = (e.clientY - rect.top - viewport.y) / viewport.zoom;
-      files.forEach((file: File) => {
-        if (file.type.startsWith('image/')) {
-          const reader = new FileReader();
-          reader.onload = (ev) => {
-            const base64 = ev.target?.result as string;
-            if (base64) onImportImage(base64, dropX, dropY);
-          };
-          reader.readAsDataURL(file);
+      try {
+        const files = Array.from(e.dataTransfer.files);
+        const rect = containerRef.current?.getBoundingClientRect();
+        if (!rect) {
+          console.warn('无法获取容器位置信息');
+          return;
         }
-      });
+        
+        const dropX = (e.clientX - rect.left - viewport.x) / viewport.zoom;
+        const dropY = (e.clientY - rect.top - viewport.y) / viewport.zoom;
+        
+        files.forEach((file: File) => {
+          if (file.type.startsWith('image/')) {
+            const reader = new FileReader();
+            reader.onload = (ev) => {
+              try {
+                const base64 = ev.target?.result as string;
+                if (base64) {
+                  onImportImage(base64, dropX, dropY);
+                } else {
+                  console.warn('文件读取结果为空');
+                }
+              } catch (error) {
+                console.error('处理导入图片失败:', error);
+              }
+            };
+            reader.onerror = () => {
+              console.error('文件读取失败:', file.name);
+            };
+            reader.readAsDataURL(file);
+          }
+        });
+      } catch (error) {
+        console.error('处理文件拖拽失败:', error);
+      }
     }
-  };
+  }, [viewport, onImportImage]);
 
   // Determine valid selection state for UI
   const selectionCount = selectedImageIds.length;
@@ -1025,8 +1041,7 @@ const Canvas: React.FC<CanvasProps> = ({
                 height: img.height,
                 zIndex: img.zIndex,
                 boxShadow: isSelected ? '0 0 0 2px #3b82f6, 0 20px 25px -5px rgb(0 0 0 / 0.1)' : 'none',
-                transform: `rotate(${img.rotation || 0}deg)`,
-                transformOrigin: 'center center'
+                // 移除容器的旋转，改为只旋转图片元素
               }}
               onMouseDown={(e) => handleMouseDown(e, img.id)}
               draggable={true}
@@ -1047,6 +1062,7 @@ const Canvas: React.FC<CanvasProps> = ({
                 />
               )}
               
+              {/* 图片元素 */}
               <img 
                 src={img.src} 
                 alt={img.prompt}
@@ -1079,40 +1095,12 @@ const Canvas: React.FC<CanvasProps> = ({
 
         const isExpanding = expandingImageId === img.id;
         
-        // 计算旋转后的边界框（用于定位扩图控制点）
-        const rotation = img.rotation || 0;
-        const rotatedBounds = getRotatedBounds(img.width, img.height, rotation);
-        const rotatedScreenWidth = rotatedBounds.width * viewport.zoom;
-        const rotatedScreenHeight = rotatedBounds.height * viewport.zoom;
-        const rotatedOffsetX = rotatedBounds.offsetX * viewport.zoom;
-        const rotatedOffsetY = rotatedBounds.offsetY * viewport.zoom;
-        
-        // 图片中心点（屏幕坐标）
-        const centerX = screenX + screenWidth / 2;
-        const centerY = screenY + screenHeight / 2;
-        
-        // 计算控制点位置的辅助函数（考虑旋转）
+        // 计算控制点位置的辅助函数（简化版：容器不旋转，直接使用容器坐标）
+        // 由于容器不再旋转，可以直接使用容器坐标系统，无需旋转计算
         const getHandlePosition = (localX: number, localY: number) => {
-          // 在图片局部坐标系中的位置（考虑扩图偏移）
-          const worldX = localX;
-          const worldY = localY;
-          
-          // 转换为屏幕坐标（考虑旋转）
-          const rad = (rotation * Math.PI) / 180;
-          const cos = Math.cos(rad);
-          const sin = Math.sin(rad);
-          
-          // 相对于图片中心的坐标
-          const relX = worldX - img.width / 2;
-          const relY = worldY - img.height / 2;
-          
-          // 应用旋转
-          const rotatedX = relX * cos - relY * sin;
-          const rotatedY = relX * sin + relY * cos;
-          
-          // 转换为屏幕坐标
-          const screenPosX = centerX + rotatedX * viewport.zoom;
-          const screenPosY = centerY + rotatedY * viewport.zoom;
+          // 直接转换为屏幕坐标（容器不旋转，坐标系统正常）
+          const screenPosX = screenX + localX * viewport.zoom;
+          const screenPosY = screenY + localY * viewport.zoom;
           
           return { x: screenPosX, y: screenPosY };
         };
@@ -1303,7 +1291,7 @@ const Canvas: React.FC<CanvasProps> = ({
                     onClick={async (e) => {
                       e.stopPropagation();
                       try {
-                        const expandedBase64 = await generateExpandedImage(img, expandOffsets);
+                        const expandedBase64 = await generateExpandedImageLocal(img, expandOffsets);
                         // 将生成的图片传递给回调函数
                         if (onGenerateExpanded) {
                           onGenerateExpanded(img.id, expandedBase64);
@@ -1379,14 +1367,6 @@ const Canvas: React.FC<CanvasProps> = ({
                       title="扩图"
                     >
                       <Maximize2 size={14} />
-                    </button>
-
-                    <button 
-                      onClick={(e) => handleRotate(e, img.id)}
-                      className="p-1.5 hover:bg-blue-600 rounded text-slate-300 hover:text-white transition-colors"
-                      title={selectionCount > 1 ? "旋转所有选中图片" : "旋转 90°"}
-                    >
-                      <RotateCw size={14} />
                     </button>
 
                     <div className="w-px bg-slate-600 mx-1 self-center h-4" />
