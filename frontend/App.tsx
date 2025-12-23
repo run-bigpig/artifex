@@ -166,6 +166,18 @@ const App: React.FC = () => {
       case 'extract_bg':
         setupEdit('抠图：去除主体，只保留背景 (Remove subject, keep background only)');
         break;
+      
+      case 'enhance':
+        setupEdit('变清晰');
+        break;
+
+      case 'expand':
+        // 扩图模式由 Canvas 组件内部处理，这里不需要额外操作
+        break;
+
+      case 'generate_expanded':
+        // 这个动作由 onGenerateExpanded 回调处理
+        break;
 
       case 'delete':
         setImages(prev => prev.filter(i => !affectedIds.includes(i.id)));
@@ -176,6 +188,22 @@ const App: React.FC = () => {
       default:
         break;
     }
+  };
+
+  // 处理扩图生成完成
+  const handleGenerateExpanded = (imageId: string, expandedBase64: string) => {
+    // 1. 将扩图后的图片添加到参考图列表
+    setAttachments(prev => [...prev, {
+      id: generateId(),
+      type: 'local',
+      content: expandedBase64
+    }]);
+    
+    // 2. 自动在提示词输入框中写入"扩图"关键词
+    setSidebarInputValue('扩图');
+    
+    // 3. 重置选中状态（恢复到初始状态）
+    setSelectedImageIds([]);
   };
 
   const handleImportImage = async (base64: string, dropX?: number, dropY?: number) => {
@@ -485,6 +513,7 @@ const App: React.FC = () => {
               setViewport={setViewport}
               onAction={handleCanvasAction}
               onImportImage={handleImportImage}
+              onGenerateExpanded={handleGenerateExpanded}
             />
           </div>
         </div>

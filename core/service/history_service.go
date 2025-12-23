@@ -474,14 +474,15 @@ type ViewportRecord struct {
 
 // ImageRecord 图像记录
 type ImageRecord struct {
-	ID     string  `json:"id"`
-	Src    string  `json:"src"` // Base64 data URL
-	X      float64 `json:"x"`
-	Y      float64 `json:"y"`
-	Width  float64 `json:"width"`
-	Height float64 `json:"height"`
-	ZIndex int     `json:"zIndex"`
-	Prompt string  `json:"prompt"`
+	ID       string  `json:"id"`
+	Src      string  `json:"src"` // Base64 data URL
+	X        float64 `json:"x"`
+	Y        float64 `json:"y"`
+	Width    float64 `json:"width"`
+	Height   float64 `json:"height"`
+	ZIndex   int     `json:"zIndex"`
+	Prompt   string  `json:"prompt"`
+	Rotation float64 `json:"rotation,omitempty"` // 旋转角度（度），默认 0
 }
 
 // LoadCanvasHistory 加载画布历史记录

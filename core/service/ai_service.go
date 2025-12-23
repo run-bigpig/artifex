@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 )
 
@@ -224,6 +225,63 @@ func (a *AIService) GenerateImage(paramsJSON string, requestID string) (string, 
 	return aiProvider.GenerateImage(reqCtx, params)
 }
 
+// rewritePromptIfNeeded 检测提示词并重写（支持变清晰和扩图）
+// 如果提示词包含相关关键词，则返回重写后的提示词；否则返回原提示词
+func rewritePromptIfNeeded(prompt string) string {
+	// 转换为小写以便进行不区分大小写的匹配
+	lowerPrompt := strings.ToLower(prompt)
+
+	// 定义变清晰关键词列表
+	enhanceKeywords := []string{
+		"变清晰",
+		"清晰",
+		"upscale",
+		"enhance",
+		"sharpen",
+		"提高清晰度",
+		"增强清晰度",
+		"超分辨率",
+		"super resolution",
+		"放大",
+		"enlarge",
+	}
+
+	// 定义扩图关键词列表
+	expandKeywords := []string{
+		"扩图",
+		"扩展",
+		"expand",
+		"outpaint",
+		"outpainting",
+		"extend",
+		"extend image",
+		"extend canvas",
+		"画布扩展",
+		"图片扩展",
+	}
+
+	// 检查是否包含变清晰关键词
+	for _, keyword := range enhanceKeywords {
+		if strings.Contains(lowerPrompt, strings.ToLower(keyword)) {
+			// 追加 upscale 提示
+			upscalePrompt := "\n\nPrompt: Upscale to 4K\n\nInput: 150 × 150\n\nOutput: 4096 × 4096"
+			return upscalePrompt
+		}
+	}
+
+	// 检查是否包含扩图关键词
+	for _, keyword := range expandKeywords {
+		if strings.Contains(lowerPrompt, strings.ToLower(keyword)) {
+			// 扩图提示词重写：强调扩展画布并保持原图内容
+			expandPrompt := "\n\nPrompt: Expand the image canvas while maintaining the original image content. Extend the image boundaries naturally and seamlessly."
+			return expandPrompt
+		}
+	}
+
+	// 没有匹配的关键词，返回原提示词
+	return prompt
+}
+
 // EditMultiImages 编辑图像（支持单图或多图）
 // 统一使用多图编辑方法，即使只有一张图也使用此方法
 // requestID: 请求 ID，用于管理 context 和取消请求
@@ -257,6 +315,9 @@ func (a *AIService) EditMultiImages(paramsJSON string, requestID string) (string
 	if !caps.EditImage {
 		return "", fmt.Errorf("aiProvider %s does not support image editing", aiProvider.Name())
 	}
+
+	// 检测提示词并重写（支持变清晰和扩图）
+	params.Prompt = rewritePromptIfNeeded(params.Prompt)
 
 	// 使用多图编辑方法，使用请求的 context
 	return aiProvider.EditMultiImages(reqCtx, params)

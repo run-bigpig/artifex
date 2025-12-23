@@ -7,6 +7,7 @@ export interface CanvasImage {
   height: number;
   zIndex: number;
   prompt: string;
+  rotation?: number; // 旋转角度（度），默认 0
 }
 
 export type MessageType = 'text' | 'system' | 'error';
@@ -20,7 +21,7 @@ export interface ChatMessage {
   timestamp: number;
 }
 
-export type CanvasActionType = 'edit' | 'delete' | 'extract_subject' | 'extract_mid' | 'extract_bg';
+export type CanvasActionType = 'edit' | 'delete' | 'extract_subject' | 'extract_mid' | 'extract_bg' | 'enhance' | 'expand' | 'generate_expanded';
 
 export interface Point {
   x: number;
@@ -48,4 +49,12 @@ export interface ModelSettings {
   topK: number;
   aspectRatio: AspectRatio | "";
   imageSize: ImageSize | "";
+}
+
+// 扩图偏移量（相对于原图的扩展范围）
+export interface ExpandOffsets {
+  top: number;    // 顶部扩展像素
+  right: number;  // 右侧扩展像素
+  bottom: number; // 底部扩展像素
+  left: number;   // 左侧扩展像素
 }

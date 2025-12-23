@@ -1,11 +1,60 @@
 import React, { useRef, useState, useEffect, useCallback, useMemo } from 'react';
-import { CanvasImage, Point, Viewport, CanvasActionType } from '../types';
-import { Move, ZoomIn, ZoomOut, Trash2, Edit, Upload, Copy, Check, MousePointer2, Scissors } from 'lucide-react';
+import { CanvasImage, Point, Viewport, CanvasActionType, ExpandOffsets } from '../types';
+import { Move, ZoomIn, ZoomOut, Trash2, Edit, Upload, Copy, Check, MousePointer2, Scissors, Sparkles, Maximize2, RotateCw } from 'lucide-react';
 import { ExportImage } from '../wailsjs/go/core/App';
 import { v4 as uuidv4 } from 'uuid';
 import { ImageIndex } from '../utils/imageIndex'; 
 
 const generateId = () => Math.random().toString(36).substr(2, 9);
+
+// 计算旋转后的边界框
+// 返回旋转后的边界框的宽度、高度和中心点偏移
+const getRotatedBounds = (width: number, height: number, rotation: number) => {
+  const rad = (rotation * Math.PI) / 180;
+  const cos = Math.abs(Math.cos(rad));
+  const sin = Math.abs(Math.sin(rad));
+  
+  // 旋转后的边界框尺寸
+  const rotatedWidth = width * cos + height * sin;
+  const rotatedHeight = width * sin + height * cos;
+  
+  // 中心点偏移（相对于原始左上角）
+  const centerOffsetX = (rotatedWidth - width) / 2;
+  const centerOffsetY = (rotatedHeight - height) / 2;
+  
+  return {
+    width: rotatedWidth,
+    height: rotatedHeight,
+    offsetX: centerOffsetX,
+    offsetY: centerOffsetY
+  };
+};
+
+// 将屏幕坐标转换为图片局部坐标系（考虑旋转）
+const screenToLocal = (screenX: number, screenY: number, imgX: number, imgY: number, imgWidth: number, imgHeight: number, rotation: number, viewport: Viewport) => {
+  // 先转换为画布世界坐标
+  const worldX = (screenX - viewport.x) / viewport.zoom;
+  const worldY = (screenY - viewport.y) / viewport.zoom;
+  
+  // 转换为相对于图片中心的坐标
+  const centerX = imgX + imgWidth / 2;
+  const centerY = imgY + imgHeight / 2;
+  const localX = worldX - centerX;
+  const localY = worldY - centerY;
+  
+  // 反向旋转
+  const rad = (-rotation * Math.PI) / 180;
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  
+  const rotatedX = localX * cos - localY * sin;
+  const rotatedY = localX * sin + localY * cos;
+  
+  return {
+    x: rotatedX + imgWidth / 2,
+    y: rotatedY + imgHeight / 2
+  };
+};
 
 // Helper to ensure we get a PNG blob for clipboard compatibility
 const getPngBlob = (src: string): Promise<Blob> => {
@@ -91,6 +140,7 @@ interface CanvasProps {
   setViewport: React.Dispatch<React.SetStateAction<Viewport>>;
   onAction: (id: string, action: CanvasActionType) => void;
   onImportImage: (base64: string, x: number, y: number) => void;
+  onGenerateExpanded?: (imageId: string, expandedBase64: string) => void;
 }
 
 type ResizeHandle = 'tl' | 'tr' | 'bl' | 'br';
@@ -103,7 +153,8 @@ const Canvas: React.FC<CanvasProps> = ({
   viewport,
   setViewport,
   onAction,
-  onImportImage
+  onImportImage,
+  onGenerateExpanded
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   
@@ -135,6 +186,14 @@ const Canvas: React.FC<CanvasProps> = ({
   useEffect(() => {
     setShowExtractMenu(false);
   }, [selectedImageIds]);
+
+  // 扩图模式状态（需要在 useEffect 之前声明）
+  const [expandingImageId, setExpandingImageId] = useState<string | null>(null);
+  const [expandOffsets, setExpandOffsets] = useState<ExpandOffsets>({ top: 0, right: 0, bottom: 0, left: 0 });
+  const [isDraggingExpandHandle, setIsDraggingExpandHandle] = useState(false);
+  const [draggingHandleType, setDraggingHandleType] = useState<string | null>(null);
+  const [dragStartPoint, setDragStartPoint] = useState<Point>({ x: 0, y: 0 });
+  const [expandStartOffsets, setExpandStartOffsets] = useState<ExpandOffsets>({ top: 0, right: 0, bottom: 0, left: 0 });
 
   // Internal Clipboard for Copy/Paste shortcuts
   const [internalClipboard, setInternalClipboard] = useState<CanvasImage[]>([]);
@@ -242,52 +301,43 @@ const Canvas: React.FC<CanvasProps> = ({
     }
   };
 
-  // --- Wheel Zoom/Pan ---
+  // --- Wheel Zoom ---
   const handleWheel = useCallback((e: WheelEvent) => {
     const container = containerRef.current;
     if (!container) return;
 
-    if (e.ctrlKey || e.metaKey) {
-      e.preventDefault();
-      
-      // 获取容器相对于视口的位置
-      const rect = container.getBoundingClientRect();
-      
-      // 计算鼠标在容器内的位置（相对于容器的坐标）
-      const mouseX = e.clientX - rect.left;
-      const mouseY = e.clientY - rect.top;
-      
-      // 计算鼠标指向的画布世界坐标（缩放前的世界坐标）
-      // 公式：worldX = (screenX - viewport.x) / viewport.zoom
-      const worldX = (mouseX - viewport.x) / viewport.zoom;
-      const worldY = (mouseY - viewport.y) / viewport.zoom;
-      
-      // 计算新的缩放比例
-      // 优化缩放步进值：使用更小的灵敏度，使缩放更平滑可控（约 5% 步进）
-      const zoomSensitivity = 0.0003;
-      const zoomDelta = -e.deltaY * zoomSensitivity;
-      const newZoom = Math.min(Math.max(viewport.zoom + zoomDelta, 0.1), 5);
-      
-      // 调整视口位置，使得缩放前后鼠标指向的世界坐标点在屏幕上的位置保持不变
-      // 公式：newViewport.x = mouseX - worldX * newZoom
-      // 这确保了缩放前后，鼠标指向的世界坐标点在屏幕上的位置不变
-      const newX = mouseX - worldX * newZoom;
-      const newY = mouseY - worldY * newZoom;
-      
-      setViewport(prev => ({
-        ...prev,
-        zoom: newZoom,
-        x: newX,
-        y: newY
-      }));
-    } else {
-      // 平移操作保持不变
-      setViewport(prev => ({
-        ...prev,
-        x: prev.x - e.deltaX,
-        y: prev.y - e.deltaY
-      }));
-    }
+    e.preventDefault();
+    
+    // 获取容器相对于视口的位置
+    const rect = container.getBoundingClientRect();
+    
+    // 计算鼠标在容器内的位置（相对于容器的坐标）
+    const mouseX = e.clientX - rect.left;
+    const mouseY = e.clientY - rect.top;
+    
+    // 计算鼠标指向的画布世界坐标（缩放前的世界坐标）
+    // 公式：worldX = (screenX - viewport.x) / viewport.zoom
+    const worldX = (mouseX - viewport.x) / viewport.zoom;
+    const worldY = (mouseY - viewport.y) / viewport.zoom;
+    
+    // 计算新的缩放比例
+    // 优化缩放步进值：使用更小的灵敏度，使缩放更平滑可控（约 5% 步进）
+    const zoomSensitivity = 0.0003;
+    const zoomDelta = -e.deltaY * zoomSensitivity;
+    const newZoom = Math.min(Math.max(viewport.zoom + zoomDelta, 0.1), 5);
+    
+    // 调整视口位置，使得缩放前后鼠标指向的世界坐标点在屏幕上的位置保持不变
+    // 公式：newViewport.x = mouseX - worldX * newZoom
+    // 这确保了缩放前后，鼠标指向的世界坐标点在屏幕上的位置不变
+    const newX = mouseX - worldX * newZoom;
+    const newY = mouseY - worldY * newZoom;
+    
+    setViewport(prev => ({
+      ...prev,
+      zoom: newZoom,
+      x: newX,
+      y: newY
+    }));
   }, [viewport, setViewport]);
 
   useEffect(() => {
@@ -331,6 +381,16 @@ const Canvas: React.FC<CanvasProps> = ({
     // 2. Image Click
     if (imageId) {
       e.stopPropagation();
+      
+      // 如果正在扩图模式，阻止图片拖动（但允许选择）
+      if (expandingImageId === imageId && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
+        // 只允许选择，不允许拖动
+        const isSelected = selectedImageIds.includes(imageId);
+        if (!isSelected) {
+          setSelectedImageIds([imageId]);
+        }
+        return;
+      }
       
       const isSelected = selectedImageIds.includes(imageId);
       
@@ -377,6 +437,11 @@ const Canvas: React.FC<CanvasProps> = ({
         setSelectedImageIds([]);
       }
       setShowExtractMenu(false);
+      // 退出扩图模式
+      if (expandingImageId) {
+        setExpandingImageId(null);
+        setExpandOffsets({ top: 0, right: 0, bottom: 0, left: 0 });
+      }
     }
   };
 
@@ -410,39 +475,52 @@ const Canvas: React.FC<CanvasProps> = ({
       let newHeight = resizeStartDims.height;
 
       // 等比例缩放逻辑，保持原始宽高比
-      // 计算拖动的主要方向，使用较大的变化量来保持比例
-      const deltaX = Math.abs(dx);
-      const deltaY = Math.abs(dy);
-      const scaleFactor = Math.max(deltaX / resizeStartDims.width, deltaY / resizeStartDims.height);
+      // 根据拖动的角，计算相对于对角点的偏移量
+      let deltaWidth = 0;
+      let deltaHeight = 0;
       
-      // 确定缩放方向（放大或缩小）
-      let scaleDirection = 1;
-      if (resizeHandle === 'br' || resizeHandle === 'tr') {
-        // 右下角或右上角：向右或向下拖动为放大
-        scaleDirection = (dx > 0 || dy > 0) ? 1 : -1;
-      } else {
-        // 左下角或左上角：向左或向上拖动为放大
-        scaleDirection = (dx < 0 || dy < 0) ? 1 : -1;
+      switch (resizeHandle) {
+        case 'br': // Bottom Right - 右下角：向右下拖动增加尺寸
+          deltaWidth = dx;
+          deltaHeight = dy;
+          break;
+        case 'bl': // Bottom Left - 左下角：向左下拖动增加尺寸
+          deltaWidth = -dx;
+          deltaHeight = dy;
+          break;
+        case 'tr': // Top Right - 右上角：向右上拖动增加尺寸
+          deltaWidth = dx;
+          deltaHeight = -dy;
+          break;
+        case 'tl': // Top Left - 左上角：向左上拖动增加尺寸
+          deltaWidth = -dx;
+          deltaHeight = -dy;
+          break;
       }
       
+      // 使用较大的变化量来保持宽高比（选择变化更大的方向）
+      const scaleFactor = Math.abs(deltaWidth) > Math.abs(deltaHeight * originalAspectRatio)
+        ? deltaWidth / resizeStartDims.width
+        : deltaHeight / resizeStartDims.height;
+      
       // 计算新尺寸（保持宽高比）
-      newWidth = Math.max(50, resizeStartDims.width * (1 + scaleDirection * scaleFactor));
+      newWidth = Math.max(50, resizeStartDims.width * (1 + scaleFactor));
       newHeight = newWidth / originalAspectRatio;
       
-      // 根据拖动的角调整位置
+      // 根据拖动的角调整位置，使得对角的点保持固定
       switch (resizeHandle) {
-        case 'br': // Bottom Right - 右下角
+        case 'br': // Bottom Right - 右下角：左上角固定
           // 位置不变
           break;
-        case 'bl': // Bottom Left - 左下角
-          newX = resizeStartPos.x + (resizeStartDims.width - newWidth);
+        case 'bl': // Bottom Left - 左下角：右上角固定
+          newX = resizeStartPos.x + resizeStartDims.width - newWidth;
           break;
-        case 'tr': // Top Right - 右上角
-          newY = resizeStartPos.y + (resizeStartDims.height - newHeight);
+        case 'tr': // Top Right - 右上角：左下角固定
+          newY = resizeStartPos.y + resizeStartDims.height - newHeight;
           break;
-        case 'tl': // Top Left - 左上角
-          newX = resizeStartPos.x + (resizeStartDims.width - newWidth);
-          newY = resizeStartPos.y + (resizeStartDims.height - newHeight);
+        case 'tl': // Top Left - 左上角：右下角固定
+          newX = resizeStartPos.x + resizeStartDims.width - newWidth;
+          newY = resizeStartPos.y + resizeStartDims.height - newHeight;
           break;
       }
 
@@ -612,11 +690,209 @@ const Canvas: React.FC<CanvasProps> = ({
 
   const handleActionClick = (e: React.MouseEvent, id: string, action: CanvasActionType) => {
     e.stopPropagation();
+    
+    // 处理扩图相关动作
+    if (action === 'expand') {
+      // 进入扩图模式
+      setExpandingImageId(id);
+      setExpandOffsets({ top: 0, right: 0, bottom: 0, left: 0 });
+      return;
+    }
+    
+    // 其他动作时，如果正在扩图模式，先退出扩图模式
+    if (expandingImageId && action !== 'generate_expanded') {
+      setExpandingImageId(null);
+      setExpandOffsets({ top: 0, right: 0, bottom: 0, left: 0 });
+    }
+    
     onAction(id, action);
     if (action.startsWith('extract')) {
         setShowExtractMenu(false);
     }
   };
+
+  // 处理图片旋转
+  const handleRotate = (e: React.MouseEvent, imageId: string) => {
+    e.stopPropagation();
+    
+    // 如果当前图片被选中，旋转所有选中的图片；否则只旋转当前图片
+    const targetIds = selectedImageIds.includes(imageId) ? selectedImageIds : [imageId];
+    
+    setImages(prev => prev.map(img => {
+      if (targetIds.includes(img.id)) {
+        // 每次旋转 90 度
+        const currentRotation = img.rotation || 0;
+        const newRotation = (currentRotation + 90) % 360;
+        return { ...img, rotation: newRotation };
+      }
+      return img;
+    }));
+  };
+
+  // 生成带白边画布的图片
+  const generateExpandedImage = async (img: CanvasImage, offsets: ExpandOffsets): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const imageElement = new Image();
+      imageElement.onload = () => {
+        // 计算新画布的尺寸
+        const newWidth = imageElement.naturalWidth + offsets.left + offsets.right;
+        const newHeight = imageElement.naturalHeight + offsets.top + offsets.bottom;
+        
+        // 创建 Canvas
+        const canvas = document.createElement('canvas');
+        canvas.width = newWidth;
+        canvas.height = newHeight;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          reject(new Error('Failed to get canvas context'));
+          return;
+        }
+        
+        // 填充白色背景
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fillRect(0, 0, newWidth, newHeight);
+        
+        // 绘制原图到新位置（考虑偏移量）
+        ctx.drawImage(
+          imageElement,
+          offsets.left,
+          offsets.top,
+          imageElement.naturalWidth,
+          imageElement.naturalHeight
+        );
+        
+        // 转换为 base64
+        const base64 = canvas.toDataURL('image/png');
+        resolve(base64);
+      };
+      imageElement.onerror = () => reject(new Error('Failed to load image'));
+      imageElement.src = img.src;
+    });
+  };
+
+  // 处理扩图控制点拖动开始
+  const handleExpandHandleMouseDown = (e: React.MouseEvent, handleType: string) => {
+    e.stopPropagation();
+    setIsDraggingExpandHandle(true);
+    setDraggingHandleType(handleType);
+    setDragStartPoint({ x: e.clientX, y: e.clientY });
+    setExpandStartOffsets({ ...expandOffsets });
+  };
+
+  // 处理扩图控制点拖动
+  useEffect(() => {
+    if (!isDraggingExpandHandle || !draggingHandleType || !expandingImageId) return;
+
+    // 获取正在扩图的图片
+    const expandingImg = images.find(img => img.id === expandingImageId);
+    if (!expandingImg) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      // 将屏幕坐标转换为图片局部坐标系（考虑旋转）
+      const rotation = expandingImg.rotation || 0;
+      const startLocal = screenToLocal(
+        dragStartPoint.x,
+        dragStartPoint.y,
+        expandingImg.x,
+        expandingImg.y,
+        expandingImg.width,
+        expandingImg.height,
+        rotation,
+        viewport
+      );
+      const currentLocal = screenToLocal(
+        e.clientX,
+        e.clientY,
+        expandingImg.x,
+        expandingImg.y,
+        expandingImg.width,
+        expandingImg.height,
+        rotation,
+        viewport
+      );
+      
+      const deltaX = currentLocal.x - startLocal.x;
+      const deltaY = currentLocal.y - startLocal.y;
+
+      const newOffsets = { ...expandStartOffsets };
+
+      switch (draggingHandleType) {
+        case 'top-left':
+          // 四角：对称扩展（左上角）
+          // 使用较小的变化量来保持对称，根据拖动方向判断增加或减少
+          const deltaTL = Math.min(Math.abs(deltaX), Math.abs(deltaY));
+          // 向左上拖动（deltaX < 0 && deltaY < 0）增加扩展
+          // 向右下拖动（deltaX > 0 && deltaY > 0）减少扩展
+          const signTL = (deltaX < 0 && deltaY < 0) ? 1 : (deltaX > 0 && deltaY > 0) ? -1 : 0;
+          if (signTL !== 0) {
+            newOffsets.top = Math.max(0, expandStartOffsets.top + signTL * deltaTL);
+            newOffsets.left = Math.max(0, expandStartOffsets.left + signTL * deltaTL);
+          }
+          break;
+        case 'top-right':
+          // 右上角：对称扩展
+          const deltaTR = Math.min(Math.abs(deltaX), Math.abs(deltaY));
+          // 向右上拖动（deltaX > 0 && deltaY < 0）增加扩展
+          // 向左下拖动（deltaX < 0 && deltaY > 0）减少扩展
+          const signTR = (deltaX > 0 && deltaY < 0) ? 1 : (deltaX < 0 && deltaY > 0) ? -1 : 0;
+          if (signTR !== 0) {
+            newOffsets.top = Math.max(0, expandStartOffsets.top + signTR * deltaTR);
+            newOffsets.right = Math.max(0, expandStartOffsets.right + signTR * deltaTR);
+          }
+          break;
+        case 'bottom-left':
+          // 左下角：对称扩展
+          const deltaBL = Math.min(Math.abs(deltaX), Math.abs(deltaY));
+          // 向左下拖动（deltaX < 0 && deltaY > 0）增加扩展
+          // 向右上拖动（deltaX > 0 && deltaY < 0）减少扩展
+          const signBL = (deltaX < 0 && deltaY > 0) ? 1 : (deltaX > 0 && deltaY < 0) ? -1 : 0;
+          if (signBL !== 0) {
+            newOffsets.bottom = Math.max(0, expandStartOffsets.bottom + signBL * deltaBL);
+            newOffsets.left = Math.max(0, expandStartOffsets.left + signBL * deltaBL);
+          }
+          break;
+        case 'bottom-right':
+          // 右下角：对称扩展
+          const deltaBR = Math.min(Math.abs(deltaX), Math.abs(deltaY));
+          // 向右下拖动（deltaX > 0 && deltaY > 0）增加扩展
+          // 向左上拖动（deltaX < 0 && deltaY < 0）减少扩展
+          const signBR = (deltaX > 0 && deltaY > 0) ? 1 : (deltaX < 0 && deltaY < 0) ? -1 : 0;
+          if (signBR !== 0) {
+            newOffsets.bottom = Math.max(0, expandStartOffsets.bottom + signBR * deltaBR);
+            newOffsets.right = Math.max(0, expandStartOffsets.right + signBR * deltaBR);
+          }
+          break;
+        case 'top':
+          // 四边：单向扩展
+          newOffsets.top = Math.max(0, expandStartOffsets.top - deltaY);
+          break;
+        case 'right':
+          newOffsets.right = Math.max(0, expandStartOffsets.right + deltaX);
+          break;
+        case 'bottom':
+          newOffsets.bottom = Math.max(0, expandStartOffsets.bottom + deltaY);
+          break;
+        case 'left':
+          newOffsets.left = Math.max(0, expandStartOffsets.left - deltaX);
+          break;
+      }
+
+      setExpandOffsets(newOffsets);
+    };
+
+    const handleMouseUp = () => {
+      setIsDraggingExpandHandle(false);
+      setDraggingHandleType(null);
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isDraggingExpandHandle, draggingHandleType, dragStartPoint, expandStartOffsets, expandOffsets, viewport, expandingImageId, images]);
 
   const handleExport = async (e: React.MouseEvent, img: CanvasImage) => {
     e.stopPropagation();
@@ -736,6 +1012,7 @@ const Canvas: React.FC<CanvasProps> = ({
           const isSelected = selectedImageIdsSet.has(img.id);
           // Show menu only on the primary (last) selected item to avoid clutter
           const showMenu = isSelected && img.id === primarySelectedId;
+          const isExpanding = expandingImageId === img.id;
 
           return (
             <div
@@ -747,18 +1024,34 @@ const Canvas: React.FC<CanvasProps> = ({
                 width: img.width,
                 height: img.height,
                 zIndex: img.zIndex,
-                boxShadow: isSelected ? '0 0 0 2px #3b82f6, 0 20px 25px -5px rgb(0 0 0 / 0.1)' : 'none'
+                boxShadow: isSelected ? '0 0 0 2px #3b82f6, 0 20px 25px -5px rgb(0 0 0 / 0.1)' : 'none',
+                transform: `rotate(${img.rotation || 0}deg)`,
+                transformOrigin: 'center center'
               }}
               onMouseDown={(e) => handleMouseDown(e, img.id)}
               draggable={true}
               onDragStart={(e) => handleImageDragStart(e, img)}
               onDragEnd={handleImageDragEnd}
             >
+              {/* 扩图模式：白色画布背景（在原图下方） */}
+              {isExpanding && (
+                <div
+                  className="absolute bg-white/80 border-2 border-dashed border-blue-400 pointer-events-none"
+                  style={{
+                    left: -expandOffsets.left,
+                    top: -expandOffsets.top,
+                    width: img.width + expandOffsets.left + expandOffsets.right,
+                    height: img.height + expandOffsets.top + expandOffsets.bottom,
+                    zIndex: 0, // 使用 0 而不是 -1，确保在图片容器内正确显示
+                  }}
+                />
+              )}
+              
               <img 
                 src={img.src} 
                 alt={img.prompt}
                 // Changed from object-cover to object-fill to support free resize distortion
-                className="w-full h-full object-fill select-none pointer-events-none bg-slate-800 block"
+                className="w-full h-full object-fill select-none pointer-events-none bg-slate-800 block relative"
                 draggable={false}
               />
               
@@ -784,59 +1077,214 @@ const Canvas: React.FC<CanvasProps> = ({
         const screenWidth = img.width * viewport.zoom;
         const screenHeight = img.height * viewport.zoom;
 
+        const isExpanding = expandingImageId === img.id;
+        
+        // 计算旋转后的边界框（用于定位扩图控制点）
+        const rotation = img.rotation || 0;
+        const rotatedBounds = getRotatedBounds(img.width, img.height, rotation);
+        const rotatedScreenWidth = rotatedBounds.width * viewport.zoom;
+        const rotatedScreenHeight = rotatedBounds.height * viewport.zoom;
+        const rotatedOffsetX = rotatedBounds.offsetX * viewport.zoom;
+        const rotatedOffsetY = rotatedBounds.offsetY * viewport.zoom;
+        
+        // 图片中心点（屏幕坐标）
+        const centerX = screenX + screenWidth / 2;
+        const centerY = screenY + screenHeight / 2;
+        
+        // 计算控制点位置的辅助函数（考虑旋转）
+        const getHandlePosition = (localX: number, localY: number) => {
+          // 在图片局部坐标系中的位置（考虑扩图偏移）
+          const worldX = localX;
+          const worldY = localY;
+          
+          // 转换为屏幕坐标（考虑旋转）
+          const rad = (rotation * Math.PI) / 180;
+          const cos = Math.cos(rad);
+          const sin = Math.sin(rad);
+          
+          // 相对于图片中心的坐标
+          const relX = worldX - img.width / 2;
+          const relY = worldY - img.height / 2;
+          
+          // 应用旋转
+          const rotatedX = relX * cos - relY * sin;
+          const rotatedY = relX * sin + relY * cos;
+          
+          // 转换为屏幕坐标
+          const screenPosX = centerX + rotatedX * viewport.zoom;
+          const screenPosY = centerY + rotatedY * viewport.zoom;
+          
+          return { x: screenPosX, y: screenPosY };
+        };
+
         return (
           <React.Fragment key={`ui-${img.id}`}>
-            {/* Resize Handles - 4 Corners */}
-            <>
-              {/* Top Left */}
-              <div 
-                className="absolute w-4 h-4 bg-white border-2 border-blue-500 rounded-full cursor-nw-resize z-50 hover:scale-125 transition-transform pointer-events-auto"
-                style={{
-                  left: screenX - 8,
-                  top: screenY - 8,
-                }}
-                onMouseDown={(e) => {
-                  e.stopPropagation();
-                  handleResizeStart(e, img, 'tl');
-                }}
-              />
-              {/* Top Right */}
-              <div 
-                className="absolute w-4 h-4 bg-white border-2 border-blue-500 rounded-full cursor-ne-resize z-50 hover:scale-125 transition-transform pointer-events-auto"
-                style={{
-                  left: screenX + screenWidth - 8,
-                  top: screenY - 8,
-                }}
-                onMouseDown={(e) => {
-                  e.stopPropagation();
-                  handleResizeStart(e, img, 'tr');
-                }}
-              />
-              {/* Bottom Left */}
-              <div 
-                className="absolute w-4 h-4 bg-white border-2 border-blue-500 rounded-full cursor-sw-resize z-50 hover:scale-125 transition-transform pointer-events-auto"
-                style={{
-                  left: screenX - 8,
-                  top: screenY + screenHeight - 8,
-                }}
-                onMouseDown={(e) => {
-                  e.stopPropagation();
-                  handleResizeStart(e, img, 'bl');
-                }}
-              />
-              {/* Bottom Right */}
-              <div 
-                className="absolute w-4 h-4 bg-white border-2 border-blue-500 rounded-full cursor-se-resize z-50 hover:scale-125 transition-transform pointer-events-auto"
-                style={{
-                  left: screenX + screenWidth - 8,
-                  top: screenY + screenHeight - 8,
-                }}
-                onMouseDown={(e) => {
-                  e.stopPropagation();
-                  handleResizeStart(e, img, 'br');
-                }}
-              />
-            </>
+            {/* 扩图模式：显示扩图控制点 */}
+            {isExpanding && (
+              <>
+                {/* 扩图控制点 - 四角（对称扩展） */}
+                {(() => {
+                  const topLeft = getHandlePosition(-expandOffsets.left, -expandOffsets.top);
+                  return (
+                    <div 
+                      className="absolute w-5 h-5 bg-white border-2 border-blue-500 rounded-full cursor-nw-resize z-50 hover:scale-125 transition-transform pointer-events-auto shadow-lg"
+                      style={{
+                        left: topLeft.x - 10,
+                        top: topLeft.y - 10,
+                      }}
+                      onMouseDown={(e) => handleExpandHandleMouseDown(e, 'top-left')}
+                    />
+                  );
+                })()}
+                {(() => {
+                  const topRight = getHandlePosition(img.width + expandOffsets.right, -expandOffsets.top);
+                  return (
+                    <div 
+                      className="absolute w-5 h-5 bg-white border-2 border-blue-500 rounded-full cursor-ne-resize z-50 hover:scale-125 transition-transform pointer-events-auto shadow-lg"
+                      style={{
+                        left: topRight.x - 10,
+                        top: topRight.y - 10,
+                      }}
+                      onMouseDown={(e) => handleExpandHandleMouseDown(e, 'top-right')}
+                    />
+                  );
+                })()}
+                {(() => {
+                  const bottomLeft = getHandlePosition(-expandOffsets.left, img.height + expandOffsets.bottom);
+                  return (
+                    <div 
+                      className="absolute w-5 h-5 bg-white border-2 border-blue-500 rounded-full cursor-sw-resize z-50 hover:scale-125 transition-transform pointer-events-auto shadow-lg"
+                      style={{
+                        left: bottomLeft.x - 10,
+                        top: bottomLeft.y - 10,
+                      }}
+                      onMouseDown={(e) => handleExpandHandleMouseDown(e, 'bottom-left')}
+                    />
+                  );
+                })()}
+                {(() => {
+                  const bottomRight = getHandlePosition(img.width + expandOffsets.right, img.height + expandOffsets.bottom);
+                  return (
+                    <div 
+                      className="absolute w-5 h-5 bg-white border-2 border-blue-500 rounded-full cursor-se-resize z-50 hover:scale-125 transition-transform pointer-events-auto shadow-lg"
+                      style={{
+                        left: bottomRight.x - 10,
+                        top: bottomRight.y - 10,
+                      }}
+                      onMouseDown={(e) => handleExpandHandleMouseDown(e, 'bottom-right')}
+                    />
+                  );
+                })()}
+                
+                {/* 扩图控制点 - 四边（单向扩展） */}
+                {(() => {
+                  const top = getHandlePosition(img.width / 2, -expandOffsets.top);
+                  return (
+                    <div 
+                      className="absolute w-5 h-5 bg-white border-2 border-blue-500 rounded-full cursor-n-resize z-50 hover:scale-125 transition-transform pointer-events-auto shadow-lg"
+                      style={{
+                        left: top.x - 10,
+                        top: top.y - 10,
+                      }}
+                      onMouseDown={(e) => handleExpandHandleMouseDown(e, 'top')}
+                    />
+                  );
+                })()}
+                {(() => {
+                  const right = getHandlePosition(img.width + expandOffsets.right, img.height / 2);
+                  return (
+                    <div 
+                      className="absolute w-5 h-5 bg-white border-2 border-blue-500 rounded-full cursor-e-resize z-50 hover:scale-125 transition-transform pointer-events-auto shadow-lg"
+                      style={{
+                        left: right.x - 10,
+                        top: right.y - 10,
+                      }}
+                      onMouseDown={(e) => handleExpandHandleMouseDown(e, 'right')}
+                    />
+                  );
+                })()}
+                {(() => {
+                  const bottom = getHandlePosition(img.width / 2, img.height + expandOffsets.bottom);
+                  return (
+                    <div 
+                      className="absolute w-5 h-5 bg-white border-2 border-blue-500 rounded-full cursor-s-resize z-50 hover:scale-125 transition-transform pointer-events-auto shadow-lg"
+                      style={{
+                        left: bottom.x - 10,
+                        top: bottom.y - 10,
+                      }}
+                      onMouseDown={(e) => handleExpandHandleMouseDown(e, 'bottom')}
+                    />
+                  );
+                })()}
+                {(() => {
+                  const left = getHandlePosition(-expandOffsets.left, img.height / 2);
+                  return (
+                    <div 
+                      className="absolute w-5 h-5 bg-white border-2 border-blue-500 rounded-full cursor-w-resize z-50 hover:scale-125 transition-transform pointer-events-auto shadow-lg"
+                      style={{
+                        left: left.x - 10,
+                        top: left.y - 10,
+                      }}
+                      onMouseDown={(e) => handleExpandHandleMouseDown(e, 'left')}
+                    />
+                  );
+                })()}
+              </>
+            )}
+
+            {/* Resize Handles - 4 Corners (仅在非扩图模式显示) */}
+            {!isExpanding && (
+              <>
+                {/* Top Left */}
+                <div 
+                  className="absolute w-4 h-4 bg-white border-2 border-blue-500 rounded-full cursor-nw-resize z-50 hover:scale-125 transition-transform pointer-events-auto"
+                  style={{
+                    left: screenX - 8,
+                    top: screenY - 8,
+                  }}
+                  onMouseDown={(e) => {
+                    e.stopPropagation();
+                    handleResizeStart(e, img, 'tl');
+                  }}
+                />
+                {/* Top Right */}
+                <div 
+                  className="absolute w-4 h-4 bg-white border-2 border-blue-500 rounded-full cursor-ne-resize z-50 hover:scale-125 transition-transform pointer-events-auto"
+                  style={{
+                    left: screenX + screenWidth - 8,
+                    top: screenY - 8,
+                  }}
+                  onMouseDown={(e) => {
+                    e.stopPropagation();
+                    handleResizeStart(e, img, 'tr');
+                  }}
+                />
+                {/* Bottom Left */}
+                <div 
+                  className="absolute w-4 h-4 bg-white border-2 border-blue-500 rounded-full cursor-sw-resize z-50 hover:scale-125 transition-transform pointer-events-auto"
+                  style={{
+                    left: screenX - 8,
+                    top: screenY + screenHeight - 8,
+                  }}
+                  onMouseDown={(e) => {
+                    e.stopPropagation();
+                    handleResizeStart(e, img, 'bl');
+                  }}
+                />
+                {/* Bottom Right */}
+                <div 
+                  className="absolute w-4 h-4 bg-white border-2 border-blue-500 rounded-full cursor-se-resize z-50 hover:scale-125 transition-transform pointer-events-auto"
+                  style={{
+                    left: screenX + screenWidth - 8,
+                    top: screenY + screenHeight - 8,
+                  }}
+                  onMouseDown={(e) => {
+                    e.stopPropagation();
+                    handleResizeStart(e, img, 'br');
+                  }}
+                />
+              </>
+            )}
 
             {/* Action Menu (Only for primary selection) */}
             {showMenu && (
@@ -849,78 +1297,130 @@ const Canvas: React.FC<CanvasProps> = ({
                 }}
                 onMouseDown={(e) => e.stopPropagation()} 
               >
-                 <button 
-                  onClick={(e) => handleActionClick(e, img.id, 'edit')}
-                  className="p-1.5 hover:bg-blue-600 rounded text-slate-300 hover:text-white transition-colors"
-                  title={selectionCount > 1 ? "编辑所有选中图片" : "编辑"}
-                >
-                  <Edit size={14} />
-                </button>
-
-                {/* Extract / Scissors Menu */}
-                <div className="relative">
+                {/* 扩图模式：只显示"按照新尺寸生成"按钮 */}
+                {expandingImageId === img.id ? (
+                  <button 
+                    onClick={async (e) => {
+                      e.stopPropagation();
+                      try {
+                        const expandedBase64 = await generateExpandedImage(img, expandOffsets);
+                        // 将生成的图片传递给回调函数
+                        if (onGenerateExpanded) {
+                          onGenerateExpanded(img.id, expandedBase64);
+                        }
+                        // 重置扩图状态
+                        setExpandingImageId(null);
+                        setExpandOffsets({ top: 0, right: 0, bottom: 0, left: 0 });
+                      } catch (error) {
+                        console.error('Failed to generate expanded image:', error);
+                      }
+                    }}
+                    className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 rounded text-white text-xs font-medium transition-colors flex items-center gap-1.5"
+                    title="按照新尺寸生成"
+                  >
+                    <Maximize2 size={14} />
+                    <span>按照新尺寸生成</span>
+                  </button>
+                ) : (
+                  <>
                     <button 
-                      onClick={(e) => { e.stopPropagation(); setShowExtractMenu(!showExtractMenu); }}
-                      className={`p-1.5 rounded transition-colors ${showExtractMenu ? 'bg-blue-600 text-white' : 'hover:bg-blue-600 text-slate-300 hover:text-white'}`}
-                      title="抠图 / 提取"
+                      onClick={(e) => handleActionClick(e, img.id, 'edit')}
+                      className="p-1.5 hover:bg-blue-600 rounded text-slate-300 hover:text-white transition-colors"
+                      title={selectionCount > 1 ? "编辑所有选中图片" : "编辑"}
                     >
-                      <Scissors size={14} />
+                      <Edit size={14} />
                     </button>
-                    
-                    {showExtractMenu && (
-                      <div className="absolute top-full mt-2 left-1/2 -translate-x-1/2 w-32 bg-slate-800 border border-slate-700 shadow-xl rounded-lg overflow-hidden flex flex-col z-[60]">
-                         <button 
-                            onClick={(e) => handleActionClick(e, img.id, 'extract_subject')}
-                            className="px-3 py-2 text-xs text-left text-slate-300 hover:bg-blue-600 hover:text-white transition-colors border-b border-slate-700"
-                         >
-                           保留主体
-                         </button>
-                         <button 
-                            onClick={(e) => handleActionClick(e, img.id, 'extract_mid')}
-                            className="px-3 py-2 text-xs text-left text-slate-300 hover:bg-blue-600 hover:text-white transition-colors border-b border-slate-700"
-                         >
-                           保留中景
-                         </button>
-                         <button 
-                            onClick={(e) => handleActionClick(e, img.id, 'extract_bg')}
-                            className="px-3 py-2 text-xs text-left text-slate-300 hover:bg-blue-600 hover:text-white transition-colors"
-                         >
-                           保留背景
-                         </button>
-                      </div>
-                    )}
-                </div>
 
-                <div className="w-px bg-slate-600 mx-1 self-center h-4" />
-                <button 
-                  onClick={(e) => { 
-                    e.stopPropagation(); 
-                    if (selectedImageIds.includes(img.id)) {
-                      handleCopyImages(selectedImageIds);
-                    } else {
-                      handleCopyImages([img.id]);
-                    }
-                  }}
-                  className="p-1.5 hover:bg-blue-600 rounded text-slate-300 hover:text-white transition-colors"
-                  title={selectionCount > 1 ? "复制选中图片 (原图)" : "复制原图"}
-                >
-                  {copiedId === img.id ? <Check size={14} className="text-green-400" /> : <Copy size={14} />}
-                </button>
-                <button 
-                  onClick={(e) => handleExport(e, img)}
-                  className="p-1.5 hover:bg-blue-600 rounded text-slate-300 hover:text-white transition-colors"
-                  title="导出图片"
-                >
-                  <Upload size={14} />
-                </button>
-                <div className="w-px bg-slate-600 mx-1 self-center h-4" />
-                 <button 
-                  onClick={(e) => handleActionClick(e, img.id, 'delete')}
-                  className="p-1.5 hover:bg-red-500/80 rounded text-slate-300 hover:text-white transition-colors"
-                  title="删除"
-                >
-                  <Trash2 size={14} />
-                </button>
+                    {/* Extract / Scissors Menu */}
+                    <div className="relative">
+                        <button 
+                          onClick={(e) => { e.stopPropagation(); setShowExtractMenu(!showExtractMenu); }}
+                          className={`p-1.5 rounded transition-colors ${showExtractMenu ? 'bg-blue-600 text-white' : 'hover:bg-blue-600 text-slate-300 hover:text-white'}`}
+                          title="抠图 / 提取"
+                        >
+                          <Scissors size={14} />
+                        </button>
+                        
+                        {showExtractMenu && (
+                          <div className="absolute top-full mt-2 left-1/2 -translate-x-1/2 w-32 bg-slate-800 border border-slate-700 shadow-xl rounded-lg overflow-hidden flex flex-col z-[60]">
+                             <button 
+                                onClick={(e) => handleActionClick(e, img.id, 'extract_subject')}
+                                className="px-3 py-2 text-xs text-left text-slate-300 hover:bg-blue-600 hover:text-white transition-colors border-b border-slate-700"
+                             >
+                               保留主体
+                             </button>
+                             <button 
+                                onClick={(e) => handleActionClick(e, img.id, 'extract_mid')}
+                                className="px-3 py-2 text-xs text-left text-slate-300 hover:bg-blue-600 hover:text-white transition-colors border-b border-slate-700"
+                             >
+                               保留中景
+                             </button>
+                             <button 
+                                onClick={(e) => handleActionClick(e, img.id, 'extract_bg')}
+                                className="px-3 py-2 text-xs text-left text-slate-300 hover:bg-blue-600 hover:text-white transition-colors"
+                             >
+                               保留背景
+                             </button>
+                          </div>
+                        )}
+                    </div>
+
+                    <button 
+                      onClick={(e) => handleActionClick(e, img.id, 'enhance')}
+                      className="p-1.5 hover:bg-blue-600 rounded text-slate-300 hover:text-white transition-colors"
+                      title={selectionCount > 1 ? "变清晰所有选中图片" : "变清晰"}
+                    >
+                      <Sparkles size={14} />
+                    </button>
+
+                    <button 
+                      onClick={(e) => handleActionClick(e, img.id, 'expand')}
+                      className="p-1.5 hover:bg-blue-600 rounded text-slate-300 hover:text-white transition-colors"
+                      title="扩图"
+                    >
+                      <Maximize2 size={14} />
+                    </button>
+
+                    <button 
+                      onClick={(e) => handleRotate(e, img.id)}
+                      className="p-1.5 hover:bg-blue-600 rounded text-slate-300 hover:text-white transition-colors"
+                      title={selectionCount > 1 ? "旋转所有选中图片" : "旋转 90°"}
+                    >
+                      <RotateCw size={14} />
+                    </button>
+
+                    <div className="w-px bg-slate-600 mx-1 self-center h-4" />
+                    <button 
+                      onClick={(e) => { 
+                        e.stopPropagation(); 
+                        if (selectedImageIds.includes(img.id)) {
+                          handleCopyImages(selectedImageIds);
+                        } else {
+                          handleCopyImages([img.id]);
+                        }
+                      }}
+                      className="p-1.5 hover:bg-blue-600 rounded text-slate-300 hover:text-white transition-colors"
+                      title={selectionCount > 1 ? "复制选中图片 (原图)" : "复制原图"}
+                    >
+                      {copiedId === img.id ? <Check size={14} className="text-green-400" /> : <Copy size={14} />}
+                    </button>
+                    <button 
+                      onClick={(e) => handleExport(e, img)}
+                      className="p-1.5 hover:bg-blue-600 rounded text-slate-300 hover:text-white transition-colors"
+                      title="导出图片"
+                    >
+                      <Upload size={14} />
+                    </button>
+                    <div className="w-px bg-slate-600 mx-1 self-center h-4" />
+                     <button 
+                      onClick={(e) => handleActionClick(e, img.id, 'delete')}
+                      className="p-1.5 hover:bg-red-500/80 rounded text-slate-300 hover:text-white transition-colors"
+                      title="删除"
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </>
+                )}
               </div>
             )}
           </React.Fragment>
