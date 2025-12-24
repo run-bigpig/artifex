@@ -294,13 +294,12 @@ func (u *UpdateService) RestartApplication() error {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "windows":
-		// Windows: 直接执行可执行文件
-		cmd = exec.Command(exePath)
+		// Windows: 使用 PowerShell 启动新进程，延迟执行以确保当前进程先退出
+		// 使用 Start-Sleep 延迟 2 秒后启动新进程
+		cmd = exec.Command("powershell.exe", "-Command", fmt.Sprintf("Start-Sleep -Seconds 2; Start-Process -FilePath '%s' -WorkingDirectory '%s'", exePath, filepath.Dir(exePath)))
 	case "darwin", "linux":
 		// macOS/Linux: 使用 sh 启动新进程
 		cmd = exec.Command("sh", "-c", fmt.Sprintf("sleep 2 && %s", exePath))
-		// 在 Unix 系统上，不设置 SysProcAttr，让系统默认处理
-		// 注意：如果需要进程组控制，可以使用条件编译
 	default:
 		return fmt.Errorf("不支持的操作系统: %s", runtime.GOOS)
 	}
@@ -308,6 +307,10 @@ func (u *UpdateService) RestartApplication() error {
 	// 设置工作目录为可执行文件所在目录
 	exeDir := filepath.Dir(exePath)
 	cmd.Dir = exeDir
+
+	// 使用 build tag 实现的跨平台函数设置进程属性
+	// Windows 下会隐藏窗口，Unix 系统下不做特殊处理
+	setSysProcAttr(cmd)
 
 	// 启动新进程（不等待其完成）
 	if err := cmd.Start(); err != nil {
