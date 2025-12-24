@@ -11,6 +11,7 @@ import { serializationWorker } from './services/serializationWorker';
 import { ImageIndex, hasImagesChanged } from './utils/imageIndex';
 import { activityDetector } from './services/activityDetector';
 import SaveProgressOverlay from './components/SaveProgressOverlay';
+import { Quit } from './wailsjs/runtime/runtime';
 
 const generateId = () => Math.random().toString(36).substr(2, 9);
 
@@ -502,55 +503,67 @@ const App: React.FC = () => {
   }, [viewport, images]);
 
   // ✅ 关闭应用前的保存处理函数
-  const handleClose = async (): Promise<void> => {
-    // 显示保存进度
+  // 优化：立即显示保存进度弹窗，后台异步执行保存，避免卡顿
+  const handleClose = (): void => {
+    // 立即显示保存进度弹窗（同步操作，不阻塞）
     setSaveProgress({
       isVisible: true,
       chatSaved: false,
       canvasSaved: false
     });
 
-    try {
-      // 并行保存聊天和画布历史
-      const savePromises: Promise<void>[] = [];
-      // 保存画布历史
-      savePromises.push(
-        saveCanvasHistorySync(viewportRef.current, imagesRef.current)
-          .then(() => {
-            setSaveProgress(prev => ({ ...prev, canvasSaved: true }));
-          })
-          .catch((error) => {
-            console.error('保存画布历史失败:', error);
-            setSaveProgress(prev => ({ ...prev, canvasSaved: true })); // 即使失败也标记为完成
-          })
-      );
+    // 使用 requestAnimationFrame 确保弹窗先渲染，然后再执行保存操作
+    requestAnimationFrame(() => {
+      // 在下一个事件循环中异步执行保存操作，不阻塞 UI
+      setTimeout(async () => {
+        try {
+          // 并行保存聊天和画布历史
+          const savePromises: Promise<void>[] = [];
+          
+          // 保存画布历史
+          savePromises.push(
+            saveCanvasHistorySync(viewportRef.current, imagesRef.current)
+              .then(() => {
+                setSaveProgress(prev => ({ ...prev, canvasSaved: true }));
+              })
+              .catch((error) => {
+                console.error('保存画布历史失败:', error);
+                setSaveProgress(prev => ({ ...prev, canvasSaved: true })); // 即使失败也标记为完成
+              })
+          );
 
-      // 保存聊天历史
-      if (messagesRef.current && messagesRef.current.length > 0) {
-        savePromises.push(
-          saveChatHistorySync(messagesRef.current)
-            .then(() => {
-              setSaveProgress(prev => ({ ...prev, chatSaved: true }));
-            })
-            .catch((error) => {
-              console.error('保存聊天历史失败:', error);
-              setSaveProgress(prev => ({ ...prev, chatSaved: true })); // 即使失败也标记为完成
-            })
-        );
-      } else {
-        // 没有消息，直接标记为完成
-        setSaveProgress(prev => ({ ...prev, chatSaved: true }));
-      }
+          // 保存聊天历史
+          if (messagesRef.current && messagesRef.current.length > 0) {
+            savePromises.push(
+              saveChatHistorySync(messagesRef.current)
+                .then(() => {
+                  setSaveProgress(prev => ({ ...prev, chatSaved: true }));
+                })
+                .catch((error) => {
+                  console.error('保存聊天历史失败:', error);
+                  setSaveProgress(prev => ({ ...prev, chatSaved: true })); // 即使失败也标记为完成
+                })
+            );
+          } else {
+            // 没有消息，直接标记为完成
+            setSaveProgress(prev => ({ ...prev, chatSaved: true }));
+          }
 
-      // 等待所有保存完成
-      await Promise.all(savePromises);
+          // 等待所有保存完成
+          await Promise.all(savePromises);
 
-      // 短暂延迟，让用户看到完成状态
-      await new Promise(resolve => setTimeout(resolve, 500));
-    } catch (error) {
-      console.error('保存历史记录时出错:', error);
-      // 即使出错也继续关闭
-    }
+          // 短暂延迟，让用户看到完成状态
+          await new Promise(resolve => setTimeout(resolve, 500));
+          
+          // 保存完成后关闭应用
+          Quit();
+        } catch (error) {
+          console.error('保存历史记录时出错:', error);
+          // 即使出错也关闭应用
+          Quit();
+        }
+      }, 0);
+    });
   };
 
   // ✅ 应用关闭时保存画布历史记录（后备方案，用于异常退出）

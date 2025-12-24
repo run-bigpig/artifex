@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { X, Download, RefreshCw, CheckCircle2, AlertCircle, Loader2, ExternalLink } from 'lucide-react';
-import { checkForUpdate, updateWithProgress, getCurrentVersion, UpdateInfo, UpdateProgress } from '../services/updateService';
-import { Quit } from '../wailsjs/runtime/runtime';
+import { checkForUpdate, updateWithProgress, getCurrentVersion, restartApplication, UpdateInfo, UpdateProgress } from '../services/updateService';
 
 interface UpdateDialogProps {
   isOpen: boolean;
@@ -71,7 +70,7 @@ const UpdateDialog: React.FC<UpdateDialogProps> = ({ isOpen, onClose }) => {
       });
 
       if (finalProgress.status === 'completed') {
-        // 更新完成，提示用户重启
+        // 更新完成，自动重启应用
         setTimeout(() => {
           handleRestart();
         }, 2000);
@@ -87,16 +86,18 @@ const UpdateDialog: React.FC<UpdateDialogProps> = ({ isOpen, onClose }) => {
     }
   };
 
-  // 重启应用（通过退出应用，用户需要手动重启）
+  // 重启应用（自动重启）
   const handleRestart = async () => {
     try {
-      // 延迟退出，给用户时间看到完成消息
-      setTimeout(() => {
-        Quit();
-      }, 3000);
+      // 调用后端重启方法，会自动启动新进程并退出当前进程
+      await restartApplication();
+      // 如果重启成功，这里不会执行（进程已退出）
+      // 如果失败，会抛出错误
     } catch (err) {
-      console.error('退出失败:', err);
-      setError('更新完成，请手动关闭并重新打开应用');
+      console.error('重启失败:', err);
+      const errorMessage = err instanceof Error ? err.message : '重启失败';
+      setError(`更新完成，但自动重启失败: ${errorMessage}。请手动关闭并重新打开应用`);
+      setUpdating(false);
     }
   };
 

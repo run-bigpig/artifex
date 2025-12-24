@@ -209,6 +209,7 @@ func (a *App) SaveCanvasHistorySync(canvasHistoryJSON string) error {
 }
 
 // Update 执行程序内更新（下载并替换当前可执行文件）
+// 通过 Wails Event 系统实时推送更新进度，事件名称为 "update:progress"
 // 返回错误信息字符串，如果成功则返回空字符串
 func (a *App) Update() (string, error) {
 	if err := a.updateService.Update(); err != nil {
@@ -217,8 +218,8 @@ func (a *App) Update() (string, error) {
 	return "", nil
 }
 
-// UpdateWithProgress 执行更新并返回进度信息（JSON格式）
-// 返回 JSON 格式的 UpdateProgress
-func (a *App) UpdateWithProgress() (string, error) {
-	return a.updateService.UpdateWithProgress()
+// RestartApplication 重启应用程序
+// 更新完成后调用此方法自动重启应用
+func (a *App) RestartApplication() error {
+	return a.updateService.RestartApplication()
 }

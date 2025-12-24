@@ -5,7 +5,7 @@ go 1.24.0
 require (
 	cloud.google.com/go/auth v0.17.0
 	github.com/blang/semver v3.5.1+incompatible
-	github.com/run-bigpig/go-github-selfupdate v1.0.0
+	github.com/run-bigpig/go-github-selfupdate v1.0.1
 	github.com/sashabaranov/go-openai v1.41.2
 	github.com/wailsapp/wails/v2 v2.11.0
 	golang.org/x/crypto v0.45.0

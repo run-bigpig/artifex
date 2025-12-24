@@ -42,26 +42,21 @@ const Header: React.FC<HeaderProps> = ({ onOpenAppSettings, onClose }) => {
     }, 100);
   };
 
-  const handleClose = async () => {
+  const handleClose = () => {
     if (isClosing) return; // 防止重复点击
     
     setIsClosing(true);
     
-    try {
-      // 如果有自定义关闭处理函数，先执行它（保存数据）
-      if (onClose) {
-        await onClose();
-      }
-      
-      // 保存完成后关闭应用
+    // 调用自定义关闭处理函数（会显示保存进度并在后台完成保存和关闭）
+    // 注意：onClose 现在会立即返回，保存和关闭在后台异步执行
+    if (onClose) {
+      onClose();
+    } else {
+      // 如果没有自定义处理函数，直接关闭
       Quit();
-    } catch (error) {
-      console.error('关闭应用时出错:', error);
-      // 即使保存失败，也关闭应用
-      Quit();
-    } finally {
-      setIsClosing(false);
     }
+    
+    // 注意：这里不再设置 setIsClosing(false)，因为应用即将关闭
   };
 
   const handleSettings = () => {

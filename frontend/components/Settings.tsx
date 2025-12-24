@@ -2,8 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Settings as SettingsType, AISettings } from '../types/settings';
 import { loadSettings, saveSettings } from '../services/settingsService';
 import { X, Save, Loader2, Eye, EyeOff, CheckCircle2, AlertCircle, RefreshCw, Info, Download, ExternalLink } from 'lucide-react';
-import { getCurrentVersion, checkForUpdate, updateWithProgress, UpdateInfo, UpdateProgress } from '../services/updateService';
-import { Quit } from '../wailsjs/runtime/runtime';
+import { getCurrentVersion, checkForUpdate, updateWithProgress, restartApplication, UpdateInfo, UpdateProgress } from '../services/updateService';
 
 interface SettingsProps {
   isOpen: boolean;
@@ -97,10 +96,10 @@ const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
       });
 
       if (finalProgress.status === 'completed') {
-        // 更新完成，延迟退出应用
+        // 更新完成，自动重启应用
         setTimeout(() => {
-          Quit();
-        }, 3000);
+          handleRestart();
+        }, 2000);
       } else if (finalProgress.status === 'error') {
         setUpdateError(finalProgress.message);
         setUpdating(false);
@@ -110,6 +109,21 @@ const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
       setUpdateError(errorMessage);
       setUpdating(false);
       setUpdateProgress(null);
+    }
+  };
+
+  // 重启应用（自动重启）
+  const handleRestart = async () => {
+    try {
+      // 调用后端重启方法，会自动启动新进程并退出当前进程
+      await restartApplication();
+      // 如果重启成功，这里不会执行（进程已退出）
+      // 如果失败，会抛出错误
+    } catch (err) {
+      console.error('重启失败:', err);
+      const errorMessage = err instanceof Error ? err.message : '重启失败';
+      setUpdateError(`更新完成，但自动重启失败: ${errorMessage}。请手动关闭并重新打开应用`);
+      setUpdating(false);
     }
   };
 

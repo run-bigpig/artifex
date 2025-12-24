@@ -22,6 +22,28 @@ import { CanvasImage, Viewport } from '../types';
 import { serializationWorker } from './serializationWorker';
 import { activityDebounce } from '../utils/activityDebounce';
 
+// 保存上次的数据快照，用于检测数据是否发生变化
+let lastChatHistorySnapshot: string | null = null;
+let lastCanvasHistorySnapshot: string | null = null;
+
+/**
+ * 深度比较两个数据是否相同（通过 JSON 序列化比较）
+ * @param data1 第一个数据
+ * @param data2 第二个数据
+ * @returns 如果数据相同返回 true，否则返回 false
+ */
+const isDataEqual = (data1: any, data2: any): boolean => {
+  try {
+    // 使用 JSON.stringify 进行快速比较
+    // 注意：这种方法对于对象属性顺序敏感，但对于我们的场景已经足够
+    return JSON.stringify(data1) === JSON.stringify(data2);
+  } catch (error) {
+    // 如果序列化失败，认为数据不同，允许保存
+    console.warn('[HistoryService] 数据比较失败，将执行保存:', error);
+    return false;
+  }
+};
+
 /**
  * 加载聊天历史记录
  * ✅ 注意：此函数只应在应用启动时调用一次
@@ -31,18 +53,37 @@ export const loadChatHistory = async (): Promise<ChatMessage[]> => {
   try {
     const historyJSON = await LoadChatHistory();
     if (!historyJSON || historyJSON === '[]') {
+      // 初始化空快照
+      lastChatHistorySnapshot = '[]';
       return [];
     }
     const messages: ChatMessage[] = JSON.parse(historyJSON);
+    // 初始化快照，避免首次保存时误判为无变化
+    lastChatHistorySnapshot = historyJSON;
     return messages;
   } catch (error) {
     console.error('Failed to load chat history:', error);
+    lastChatHistorySnapshot = '[]';
     return [];
   }
 };
 
 // 内部保存函数（实际执行保存操作）
 const _saveChatHistoryInternal = (messages: ChatMessage[]): void => {
+  // 检测数据是否发生变化
+  if (lastChatHistorySnapshot !== null) {
+    try {
+      const lastMessages = JSON.parse(lastChatHistorySnapshot);
+      if (isDataEqual(messages, lastMessages)) {
+        // 数据未变化，跳过保存
+        return;
+      }
+    } catch (error) {
+      // 解析失败，继续执行保存
+      console.warn('[HistoryService] 解析上次聊天快照失败，将执行保存:', error);
+    }
+  }
+  
   const startTime = performance.now();
   
   // 使用 Web Worker 异步序列化，避免阻塞主线程
@@ -54,6 +95,9 @@ const _saveChatHistoryInternal = (messages: ChatMessage[]): void => {
       if (serializeTime > 100) {
         console.warn(`[HistoryService] 聊天序列化耗时较长: ${serializeTime.toFixed(2)}ms, 数据大小: ${(historyJSON.length / 1024).toFixed(2)}KB`);
       }
+      
+      // 更新快照
+      lastChatHistorySnapshot = historyJSON;
       
       // 使用事件系统发送保存请求，完全非阻塞
       EventsEmit('history:save-chat', historyJSON);
@@ -68,6 +112,9 @@ const _saveChatHistoryInternal = (messages: ChatMessage[]): void => {
         if (fallbackTime > 100) {
           console.warn(`[HistoryService] 主线程序列化耗时较长: ${fallbackTime.toFixed(2)}ms`);
         }
+        
+        // 更新快照
+        lastChatHistorySnapshot = historyJSON;
         
         EventsEmit('history:save-chat', historyJSON);
       } catch (fallbackError) {
@@ -93,6 +140,8 @@ export const saveChatHistory = activityDebounce(_saveChatHistoryInternal, 10000)
 export const clearChatHistory = async (): Promise<void> => {
   try {
     await ClearChatHistory();
+    // 清除快照
+    lastChatHistorySnapshot = '[]';
   } catch (error) {
     console.error('Failed to clear chat history:', error);
     throw error;
@@ -108,32 +157,49 @@ export const loadCanvasHistory = async (): Promise<{ viewport: Viewport; images:
   try {
     const historyJSON = await LoadCanvasHistory();
     if (!historyJSON) {
-      return {
-        viewport: { x: 0, y: 0, zoom: 1 },
-        images: []
-      };
+      // 初始化空快照
+      const emptyData = { viewport: { x: 0, y: 0, zoom: 1 }, images: [] };
+      lastCanvasHistorySnapshot = JSON.stringify(emptyData);
+      return emptyData;
     }
     const data = JSON.parse(historyJSON);
-    return {
+    const result = {
       viewport: data.viewport || { x: 0, y: 0, zoom: 1 },
       images: data.images || []
     };
+    // 初始化快照，避免首次保存时误判为无变化
+    lastCanvasHistorySnapshot = historyJSON;
+    return result;
   } catch (error) {
     console.error('Failed to load canvas history:', error);
-    return {
-      viewport: { x: 0, y: 0, zoom: 1 },
-      images: []
-    };
+    const emptyData = { viewport: { x: 0, y: 0, zoom: 1 }, images: [] };
+    lastCanvasHistorySnapshot = JSON.stringify(emptyData);
+    return emptyData;
   }
 };
 
 // 内部保存函数（实际执行保存操作）
 const _saveCanvasHistoryInternal = (viewport: Viewport, images: CanvasImage[]): void => {
-  const startTime = performance.now();
   const data = {
     viewport,
     images
   };
+  
+  // 检测数据是否发生变化
+  if (lastCanvasHistorySnapshot !== null) {
+    try {
+      const lastData = JSON.parse(lastCanvasHistorySnapshot);
+      if (isDataEqual(data, lastData)) {
+        // 数据未变化，跳过保存
+        return;
+      }
+    } catch (error) {
+      // 解析失败，继续执行保存
+      console.warn('[HistoryService] 解析上次画布快照失败，将执行保存:', error);
+    }
+  }
+  
+  const startTime = performance.now();
   
   // 使用 Web Worker 异步序列化，避免阻塞主线程
   serializationWorker.stringify(data)
@@ -144,6 +210,9 @@ const _saveCanvasHistoryInternal = (viewport: Viewport, images: CanvasImage[]): 
       if (serializeTime > 100) {
         console.warn(`[HistoryService] 画布序列化耗时较长: ${serializeTime.toFixed(2)}ms, 数据大小: ${(historyJSON.length / 1024).toFixed(2)}KB`);
       }
+      
+      // 更新快照
+      lastCanvasHistorySnapshot = historyJSON;
       
       // 使用事件系统发送保存请求，完全非阻塞
       EventsEmit('history:save-canvas', historyJSON);
@@ -158,6 +227,9 @@ const _saveCanvasHistoryInternal = (viewport: Viewport, images: CanvasImage[]): 
         if (fallbackTime > 100) {
           console.warn(`[HistoryService] 主线程序列化耗时较长: ${fallbackTime.toFixed(2)}ms`);
         }
+        
+        // 更新快照
+        lastCanvasHistorySnapshot = historyJSON;
         
        EventsEmit('history:save-canvas', historyJSON);
       } catch (fallbackError) {
@@ -284,6 +356,9 @@ export const saveCanvasHistorySync = async (viewport: Viewport, images: CanvasIm
 export const clearCanvasHistory = async (): Promise<void> => {
   try {
     await ClearCanvasHistory();
+    // 清除快照
+    const emptyData = { viewport: { x: 0, y: 0, zoom: 1 }, images: [] };
+    lastCanvasHistorySnapshot = JSON.stringify(emptyData);
   } catch (error) {
     console.error('Failed to clear canvas history:', error);
     throw error;

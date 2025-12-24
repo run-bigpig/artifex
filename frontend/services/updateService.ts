@@ -1,4 +1,5 @@
-import { CheckForUpdate, GetCurrentVersion, Update, UpdateWithProgress } from '../wailsjs/go/core/App';
+import { CheckForUpdate, GetCurrentVersion, Update, RestartApplication } from '../wailsjs/go/core/App';
+import { EventsOn, EventsOff } from '../wailsjs/runtime/runtime';
 
 /**
  * 更新信息接口
@@ -64,35 +65,103 @@ export const update = async (): Promise<string> => {
 };
 
 /**
- * 执行更新（带进度信息）
+ * 执行更新（带进度信息，通过事件监听）
  * @param onProgress 进度回调函数
- * @returns 更新进度信息
+ * @returns Promise，resolve 时返回最终的更新进度信息
  */
 export const updateWithProgress = async (
   onProgress?: (progress: UpdateProgress) => void
 ): Promise<UpdateProgress> => {
+  return new Promise<UpdateProgress>((resolve, reject) => {
+    let isResolved = false;
+    let timeoutId: NodeJS.Timeout | null = null;
+
+    // 监听更新进度事件（先设置监听，再启动更新）
+    const unsubscribe = EventsOn('update:progress', (progressJSON: string) => {
+      try {
+        const progress: UpdateProgress = JSON.parse(progressJSON);
+
+        // 调用进度回调
+        if (onProgress) {
+          onProgress(progress);
+        }
+
+        // 如果更新完成或出错，清理监听并 resolve/reject
+        if (progress.status === 'completed' && !isResolved) {
+          isResolved = true;
+          if (timeoutId) {
+            clearTimeout(timeoutId);
+          }
+          unsubscribe();
+          resolve(progress);
+        } else if (progress.status === 'error' && !isResolved) {
+          isResolved = true;
+          if (timeoutId) {
+            clearTimeout(timeoutId);
+          }
+          unsubscribe();
+          reject(new Error(progress.message));
+        }
+      } catch (error) {
+        console.error('解析更新进度失败:', error);
+        if (!isResolved) {
+          isResolved = true;
+          if (timeoutId) {
+            clearTimeout(timeoutId);
+          }
+          unsubscribe();
+          reject(error);
+        }
+      }
+    });
+
+    // 设置超时保护（1小时超时）
+    timeoutId = setTimeout(() => {
+      if (!isResolved) {
+        isResolved = true;
+        unsubscribe();
+        reject(new Error('更新超时，请检查网络连接'));
+      }
+    }, 3600000);
+
+    // 启动更新（异步执行，不阻塞）
+    Update()
+      .catch((error) => {
+        // Update() 如果立即失败，可能是同步错误
+        if (!isResolved) {
+          isResolved = true;
+          if (timeoutId) {
+            clearTimeout(timeoutId);
+          }
+          unsubscribe();
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          const errorProgress: UpdateProgress = {
+            status: 'error',
+            message: errorMessage,
+            percent: 0,
+          };
+          
+          if (onProgress) {
+            onProgress(errorProgress);
+          }
+          
+          reject(new Error(errorMessage));
+        }
+      });
+    // 注意：Update() 成功返回不代表更新完成，实际进度通过事件推送
+  });
+};
+
+/**
+ * 重启应用程序
+ * 更新完成后调用此方法自动重启应用
+ */
+export const restartApplication = async (): Promise<void> => {
   try {
-    const result = await UpdateWithProgress();
-    const progress: UpdateProgress = JSON.parse(result);
-    
-    if (onProgress) {
-      onProgress(progress);
-    }
-    
-    return progress;
+    await RestartApplication();
   } catch (error) {
-    console.error('更新失败:', error);
+    console.error('重启应用失败:', error);
     const errorMessage = error instanceof Error ? error.message : String(error);
-    const errorProgress: UpdateProgress = {
-      status: 'error',
-      message: errorMessage,
-      percent: 0,
-    };
-    
-    if (onProgress) {
-      onProgress(errorProgress);
-    }
-    
     throw new Error(errorMessage);
   }
 };
