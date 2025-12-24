@@ -294,10 +294,8 @@ func (u *UpdateService) RestartApplication() error {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "windows":
-		// Windows: 使用 PowerShell 启动新进程，延迟执行以确保当前进程先退出
-		// 使用 Start-Sleep 延迟 2 秒后启动新进程
-		// 注意：PowerShell 的 Start-Process 命令本身会在后台启动进程，不需要隐藏窗口
-		cmd = exec.Command("powershell.exe", "-Command", fmt.Sprintf("Start-Sleep -Seconds 2; Start-Process -FilePath '%s' -WorkingDirectory '%s'", exePath, filepath.Dir(exePath)))
+		// Windows: 直接执行可执行文件
+		cmd = exec.Command(exePath)
 	case "darwin", "linux":
 		// macOS/Linux: 使用 sh 启动新进程
 		cmd = exec.Command("sh", "-c", fmt.Sprintf("sleep 2 && %s", exePath))

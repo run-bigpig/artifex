@@ -32,6 +32,13 @@ const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
         loadSettingsData();
       }
       loadVersionInfo();
+    } else {
+      // 关闭弹窗时重置更新相关状态
+      setUpdateInfo(null);
+      setCheckingUpdate(false);
+      setUpdating(false);
+      setUpdateProgress(null);
+      setUpdateError(null);
     }
   }, [isOpen]);
 
