@@ -993,7 +993,7 @@ const Sidebar: React.FC<SidebarProps> = ({
                               <span className="text-xs font-medium">
                                 {resolvedAttachments.length > 0 && modelSettings.aspectRatio === "" && modelSettings.imageSize === ""
                                   ? '保持原图'
-                                  : `${modelSettings.aspectRatio || '1:1'} · ${modelSettings.imageSize || '1K'}`}
+                                  : `${modelSettings.aspectRatio || (resolvedAttachments.length > 0 ? '原图' : '1:1')} · ${modelSettings.imageSize || (resolvedAttachments.length > 0 ? '原图' : '1K')}`}
                               </span>
                             </button>
 

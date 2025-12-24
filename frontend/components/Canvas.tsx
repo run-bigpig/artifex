@@ -66,6 +66,9 @@ const Canvas: React.FC<CanvasProps> = ({
   // 使用 ref 跟踪 Alt 键状态，避免状态更新延迟问题
   const altKeyPressedRef = useRef(false);
   
+  // 使用 ref 跟踪 Ctrl 键状态，用于对称扩展功能
+  const ctrlKeyPressedRef = useRef(false);
+  
   // ✅ 性能优化：使用 ref 跟踪是否正在拖动，避免 zIndex 更新和拖动冲突
   const isDraggingRef = useRef(false);
   
@@ -471,6 +474,29 @@ const Canvas: React.FC<CanvasProps> = ({
       if (e.key === 'Alt' || !e.altKey) {
         altKeyPressedRef.current = false;
         setIsDragOutMode(false);
+      }
+    };
+    
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+    };
+  }, []);
+
+  // 监听键盘事件，跟踪 Ctrl 键状态（用于对称扩展功能）
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Control' || e.ctrlKey || e.metaKey) {
+        ctrlKeyPressedRef.current = true;
+      }
+    };
+    
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.key === 'Control' || (!e.ctrlKey && !e.metaKey)) {
+        ctrlKeyPressedRef.current = false;
       }
     };
     
@@ -976,64 +1002,141 @@ const Canvas: React.FC<CanvasProps> = ({
 
       const newOffsets = { ...expandStartOffsets };
 
+      // 检测 Ctrl 键是否按下（用于对称扩展功能）
+      const isCtrlPressed = e.ctrlKey || e.metaKey || ctrlKeyPressedRef.current;
+
       switch (draggingHandleType) {
         case 'top-left':
-          // 四角：对称扩展（左上角）
-          // 使用较小的变化量来保持对称，根据拖动方向判断增加或减少
+          // 四角：根据 Ctrl 键状态决定是局部对称扩展还是对角对称扩展
           const deltaTL = Math.min(Math.abs(deltaX), Math.abs(deltaY));
           // 向左上拖动（deltaX < 0 && deltaY < 0）增加扩展
           // 向右下拖动（deltaX > 0 && deltaY > 0）减少扩展
           const signTL = (deltaX < 0 && deltaY < 0) ? 1 : (deltaX > 0 && deltaY > 0) ? -1 : 0;
           if (signTL !== 0) {
-            newOffsets.top = Math.max(0, expandStartOffsets.top + signTL * deltaTL);
-            newOffsets.left = Math.max(0, expandStartOffsets.left + signTL * deltaTL);
+            if (isCtrlPressed) {
+              // Ctrl 键按下：对角对称扩展（拖动左上角时，右下角同步扩展）
+              const expandDelta = signTL * deltaTL;
+              newOffsets.top = Math.max(0, expandStartOffsets.top + expandDelta);
+              newOffsets.left = Math.max(0, expandStartOffsets.left + expandDelta);
+              newOffsets.bottom = Math.max(0, expandStartOffsets.bottom + expandDelta);
+              newOffsets.right = Math.max(0, expandStartOffsets.right + expandDelta);
+            } else {
+              // 未按 Ctrl 键：局部对称扩展（只扩展当前角的两条边）
+              newOffsets.top = Math.max(0, expandStartOffsets.top + signTL * deltaTL);
+              newOffsets.left = Math.max(0, expandStartOffsets.left + signTL * deltaTL);
+            }
           }
           break;
         case 'top-right':
-          // 右上角：对称扩展
+          // 右上角：根据 Ctrl 键状态决定是局部对称扩展还是对角对称扩展
           const deltaTR = Math.min(Math.abs(deltaX), Math.abs(deltaY));
           // 向右上拖动（deltaX > 0 && deltaY < 0）增加扩展
           // 向左下拖动（deltaX < 0 && deltaY > 0）减少扩展
           const signTR = (deltaX > 0 && deltaY < 0) ? 1 : (deltaX < 0 && deltaY > 0) ? -1 : 0;
           if (signTR !== 0) {
-            newOffsets.top = Math.max(0, expandStartOffsets.top + signTR * deltaTR);
-            newOffsets.right = Math.max(0, expandStartOffsets.right + signTR * deltaTR);
+            if (isCtrlPressed) {
+              // Ctrl 键按下：对角对称扩展（拖动右上角时，左下角同步扩展）
+              const expandDelta = signTR * deltaTR;
+              newOffsets.top = Math.max(0, expandStartOffsets.top + expandDelta);
+              newOffsets.right = Math.max(0, expandStartOffsets.right + expandDelta);
+              newOffsets.bottom = Math.max(0, expandStartOffsets.bottom + expandDelta);
+              newOffsets.left = Math.max(0, expandStartOffsets.left + expandDelta);
+            } else {
+              // 未按 Ctrl 键：局部对称扩展（只扩展当前角的两条边）
+              newOffsets.top = Math.max(0, expandStartOffsets.top + signTR * deltaTR);
+              newOffsets.right = Math.max(0, expandStartOffsets.right + signTR * deltaTR);
+            }
           }
           break;
         case 'bottom-left':
-          // 左下角：对称扩展
+          // 左下角：根据 Ctrl 键状态决定是局部对称扩展还是对角对称扩展
           const deltaBL = Math.min(Math.abs(deltaX), Math.abs(deltaY));
           // 向左下拖动（deltaX < 0 && deltaY > 0）增加扩展
           // 向右上拖动（deltaX > 0 && deltaY < 0）减少扩展
           const signBL = (deltaX < 0 && deltaY > 0) ? 1 : (deltaX > 0 && deltaY < 0) ? -1 : 0;
           if (signBL !== 0) {
-            newOffsets.bottom = Math.max(0, expandStartOffsets.bottom + signBL * deltaBL);
-            newOffsets.left = Math.max(0, expandStartOffsets.left + signBL * deltaBL);
+            if (isCtrlPressed) {
+              // Ctrl 键按下：对角对称扩展（拖动左下角时，右上角同步扩展）
+              const expandDelta = signBL * deltaBL;
+              newOffsets.bottom = Math.max(0, expandStartOffsets.bottom + expandDelta);
+              newOffsets.left = Math.max(0, expandStartOffsets.left + expandDelta);
+              newOffsets.top = Math.max(0, expandStartOffsets.top + expandDelta);
+              newOffsets.right = Math.max(0, expandStartOffsets.right + expandDelta);
+            } else {
+              // 未按 Ctrl 键：局部对称扩展（只扩展当前角的两条边）
+              newOffsets.bottom = Math.max(0, expandStartOffsets.bottom + signBL * deltaBL);
+              newOffsets.left = Math.max(0, expandStartOffsets.left + signBL * deltaBL);
+            }
           }
           break;
         case 'bottom-right':
-          // 右下角：对称扩展
+          // 右下角：根据 Ctrl 键状态决定是局部对称扩展还是对角对称扩展
           const deltaBR = Math.min(Math.abs(deltaX), Math.abs(deltaY));
           // 向右下拖动（deltaX > 0 && deltaY > 0）增加扩展
           // 向左上拖动（deltaX < 0 && deltaY < 0）减少扩展
           const signBR = (deltaX > 0 && deltaY > 0) ? 1 : (deltaX < 0 && deltaY < 0) ? -1 : 0;
           if (signBR !== 0) {
-            newOffsets.bottom = Math.max(0, expandStartOffsets.bottom + signBR * deltaBR);
-            newOffsets.right = Math.max(0, expandStartOffsets.right + signBR * deltaBR);
+            if (isCtrlPressed) {
+              // Ctrl 键按下：对角对称扩展（拖动右下角时，左上角同步扩展）
+              const expandDelta = signBR * deltaBR;
+              newOffsets.bottom = Math.max(0, expandStartOffsets.bottom + expandDelta);
+              newOffsets.right = Math.max(0, expandStartOffsets.right + expandDelta);
+              newOffsets.top = Math.max(0, expandStartOffsets.top + expandDelta);
+              newOffsets.left = Math.max(0, expandStartOffsets.left + expandDelta);
+            } else {
+              // 未按 Ctrl 键：局部对称扩展（只扩展当前角的两条边）
+              newOffsets.bottom = Math.max(0, expandStartOffsets.bottom + signBR * deltaBR);
+              newOffsets.right = Math.max(0, expandStartOffsets.right + signBR * deltaBR);
+            }
           }
           break;
         case 'top':
-          // 四边：单向扩展
-          newOffsets.top = Math.max(0, expandStartOffsets.top - deltaY);
+          // 四边：根据 Ctrl 键状态决定是单向扩展还是对称扩展
+          if (isCtrlPressed) {
+            // Ctrl 键按下：对称扩展（拖动上边缘时，下边缘同步向下扩展相同距离）
+            const expandDelta = -deltaY; // 向上拖动（deltaY < 0）增加扩展
+            newOffsets.top = Math.max(0, expandStartOffsets.top + expandDelta);
+            newOffsets.bottom = Math.max(0, expandStartOffsets.bottom + expandDelta);
+          } else {
+            // 未按 Ctrl 键：单向扩展
+            newOffsets.top = Math.max(0, expandStartOffsets.top - deltaY);
+          }
           break;
         case 'right':
-          newOffsets.right = Math.max(0, expandStartOffsets.right + deltaX);
+          // 四边：根据 Ctrl 键状态决定是单向扩展还是对称扩展
+          if (isCtrlPressed) {
+            // Ctrl 键按下：对称扩展（拖动右边缘时，左边缘同步向左扩展相同距离）
+            const expandDelta = deltaX; // 向右拖动（deltaX > 0）增加扩展
+            newOffsets.right = Math.max(0, expandStartOffsets.right + expandDelta);
+            newOffsets.left = Math.max(0, expandStartOffsets.left + expandDelta);
+          } else {
+            // 未按 Ctrl 键：单向扩展
+            newOffsets.right = Math.max(0, expandStartOffsets.right + deltaX);
+          }
           break;
         case 'bottom':
-          newOffsets.bottom = Math.max(0, expandStartOffsets.bottom + deltaY);
+          // 四边：根据 Ctrl 键状态决定是单向扩展还是对称扩展
+          if (isCtrlPressed) {
+            // Ctrl 键按下：对称扩展（拖动下边缘时，上边缘同步向上扩展相同距离）
+            const expandDelta = deltaY; // 向下拖动（deltaY > 0）增加扩展
+            newOffsets.bottom = Math.max(0, expandStartOffsets.bottom + expandDelta);
+            newOffsets.top = Math.max(0, expandStartOffsets.top + expandDelta);
+          } else {
+            // 未按 Ctrl 键：单向扩展
+            newOffsets.bottom = Math.max(0, expandStartOffsets.bottom + deltaY);
+          }
           break;
         case 'left':
-          newOffsets.left = Math.max(0, expandStartOffsets.left - deltaX);
+          // 四边：根据 Ctrl 键状态决定是单向扩展还是对称扩展
+          if (isCtrlPressed) {
+            // Ctrl 键按下：对称扩展（拖动左边缘时，右边缘同步向右扩展相同距离）
+            const expandDelta = -deltaX; // 向左拖动（deltaX < 0）增加扩展
+            newOffsets.left = Math.max(0, expandStartOffsets.left + expandDelta);
+            newOffsets.right = Math.max(0, expandStartOffsets.right + expandDelta);
+          } else {
+            // 未按 Ctrl 键：单向扩展
+            newOffsets.left = Math.max(0, expandStartOffsets.left - deltaX);
+          }
           break;
       }
 
