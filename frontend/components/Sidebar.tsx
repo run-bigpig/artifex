@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { ChatMessage, CanvasImage, Attachment, ModelSettings, AspectRatio, ImageSize } from '../types';
-import { Send, Bot, Sparkles, X, Paperclip, Edit2, Wand2, Loader2, Plus, ArrowDownLeft, Monitor, Square, RectangleHorizontal, RectangleVertical, Image, Trash2, Square as StopIcon } from 'lucide-react';
+import { Send, Bot, Sparkles, X, Paperclip, Edit2, Wand2, Loader2, Monitor, Square, RectangleHorizontal, RectangleVertical, Image, Trash2, Square as StopIcon } from 'lucide-react';
 import { 
   enhancePrompt, 
   enhancePromptCancellable,
@@ -861,20 +861,20 @@ const Sidebar: React.FC<SidebarProps> = ({
                             <img src={src} className="w-full h-full object-contain" alt="result" />
                             
                              {/* Image Overlay Actions */}
-                             <div className="absolute inset-0 bg-black/50 opacity-0 group-hover/image:opacity-100 transition-all duration-200 flex items-center justify-center gap-3 backdrop-blur-[2px]">
+                             <div className="absolute inset-0 bg-black/50 opacity-0 group-hover/image:opacity-100 transition-all duration-200 flex flex-col items-center justify-center gap-3 backdrop-blur-[2px]">
                               <button 
                                 onClick={() => onAddToCanvas(src)}
-                                className="p-3 bg-slate-800 text-slate-200 rounded-full hover:bg-blue-600 hover:text-white transition-all hover:scale-110 shadow-xl border border-white/10"
+                                className="w-32 px-4 py-2 bg-blue-600/80 text-white rounded-lg hover:bg-blue-600 hover:text-white transition-all hover:scale-105 shadow-xl border border-blue-500/30 text-sm font-medium whitespace-nowrap"
                                 title="添加到画布"
                               >
-                                <Plus size={20} />
+                                添加到画布
                               </button>
                                <button 
                                 onClick={() => handleAddToReference(src)}
-                                className="p-3 bg-slate-800 text-slate-200 rounded-full hover:bg-blue-600 hover:text-white transition-all hover:scale-110 shadow-xl border border-white/10"
+                                className="w-32 px-4 py-2 bg-purple-600/80 text-white rounded-lg hover:bg-purple-600 hover:text-white transition-all hover:scale-105 shadow-xl border border-purple-500/30 text-sm font-medium whitespace-nowrap"
                                 title="作为参考"
                               >
-                                <ArrowDownLeft size={20} />
+                                作为参考
                               </button>
                             </div>
                           </div>

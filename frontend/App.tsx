@@ -27,8 +27,8 @@ const loadImageDimensions = (src: string): Promise<{ width: number; height: numb
 const App: React.FC = () => {
   // Application State
   const [images, setImages] = useState<CanvasImage[]>([]);
-  // Changed from single ID to array of IDs for multi-selection
-  const [selectedImageIds, setSelectedImageIds] = useState<string[]>([]);
+  // Single selection only
+  const [selectedImageId, setSelectedImageId] = useState<string | null>(null);
 
   // Sidebar/Chat State Integration
   const [sidebarInputValue, setSidebarInputValue] = useState('');
@@ -148,18 +148,18 @@ const App: React.FC = () => {
 
   // Handle actions triggered from the Canvas (Floating Menu)
   const handleCanvasAction = (id: string, action: CanvasActionType) => {
-    const affectedIds = selectedImageIds.includes(id) ? selectedImageIds : [id];
+    const affectedIds = selectedImageId === id ? [id] : [id];
 
     // Helper to setup edit mode
     const setupEdit = (promptText: string) => {
       // 1. 首先清空参考图输入框的内容，然后添加新图片到参考图输入框
       const newAttachments: Attachment[] = [];
       affectedIds.forEach(affectedId => {
-        newAttachments.push({
-          id: generateId(),
-          type: 'canvas',
-          content: affectedId
-        });
+          newAttachments.push({
+            id: generateId(),
+            type: 'canvas',
+            content: affectedId
+          });
       });
 
       // 一次性设置新的 attachments（清空旧内容并添加新内容）
@@ -202,7 +202,7 @@ const App: React.FC = () => {
 
       case 'delete':
         setImages(prev => prev.filter(i => !affectedIds.includes(i.id)));
-        setSelectedImageIds([]);
+        setSelectedImageId(null);
         // Also remove from sidebar attachments if they were attached
         setAttachments(prev => prev.filter(a => !(a.type === 'canvas' && affectedIds.includes(a.content))));
         break;
@@ -227,7 +227,7 @@ const App: React.FC = () => {
     setSidebarInputValue('扩图');
 
     // 4. 重置选中状态（恢复到初始状态）
-    setSelectedImageIds([]);
+    setSelectedImageId(null);
   };
 
   const handleImportImage = async (base64: string, dropX?: number, dropY?: number) => {
@@ -264,7 +264,7 @@ const App: React.FC = () => {
 
       setImages(prev => [...prev, newImage]);
       // Auto-select imported image
-      setSelectedImageIds([newId]);
+      setSelectedImageId(newId);
     } catch (e) {
       console.error("Failed to load image dimensions", e);
     }
@@ -300,7 +300,7 @@ const App: React.FC = () => {
       };
 
       setImages(prev => [...prev, newImage]);
-      setSelectedImageIds([newImage.id]);
+      setSelectedImageId(newImage.id);
       return base64;
     } catch (error) {
       console.error(error);
@@ -343,7 +343,7 @@ const App: React.FC = () => {
       };
 
       setImages(prev => [...prev, newImage]);
-      setSelectedImageIds([newImage.id]);
+      setSelectedImageId(newImage.id);
       return newBase64;
     } catch (error) {
       console.error(error);
@@ -623,8 +623,8 @@ const App: React.FC = () => {
             <Canvas
               images={images}
               setImages={setImages}
-              selectedImageIds={selectedImageIds}
-              setSelectedImageIds={setSelectedImageIds}
+              selectedImageId={selectedImageId}
+              setSelectedImageId={setSelectedImageId}
               viewport={viewport}
               setViewport={setViewport}
               onAction={handleCanvasAction}

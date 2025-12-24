@@ -3,7 +3,7 @@ import { CanvasImage, Point, Viewport, CanvasActionType, ExpandOffsets } from '.
 import { Move, ZoomIn, ZoomOut, Trash2, Edit, Upload, Copy, Check, MousePointer2, Scissors, Sparkles, Maximize2 } from 'lucide-react';
 import { ExportImage } from '../wailsjs/go/core/App';
 import { v4 as uuidv4 } from 'uuid';
-import { ImageIndex } from '../utils/imageIndex';
+import { ImageIndex } from '../utils/imageIndex'; 
 import {
   getPngBlob,
   createDragPreviewThumbnailSync,
@@ -20,8 +20,8 @@ const generateId = () => Math.random().toString(36).substr(2, 9);
 interface CanvasProps {
   images: CanvasImage[];
   setImages: React.Dispatch<React.SetStateAction<CanvasImage[]>>;
-  selectedImageIds: string[];
-  setSelectedImageIds: (ids: string[]) => void;
+  selectedImageId: string | null;
+  setSelectedImageId: (id: string | null) => void;
   viewport: Viewport;
   setViewport: React.Dispatch<React.SetStateAction<Viewport>>;
   onAction: (id: string, action: CanvasActionType) => void;
@@ -34,8 +34,8 @@ type ResizeHandle = 'tl' | 'tr' | 'bl' | 'br';
 const Canvas: React.FC<CanvasProps> = ({
   images,
   setImages,
-  selectedImageIds,
-  setSelectedImageIds,
+  selectedImageId,
+  setSelectedImageId,
   viewport,
   setViewport,
   onAction,
@@ -74,11 +74,11 @@ const Canvas: React.FC<CanvasProps> = ({
   // Reset dropdown when selection changes
   useEffect(() => {
     setShowExtractMenu(false);
-  }, [selectedImageIds]);
+  }, [selectedImageId]);
 
   // ✅ 性能优化：提取 zIndex 更新逻辑为独立函数，可在拖动时立即同步调用
-  const updateSelectedImagesZIndex = useCallback((targetSelectedIds: string[], sync: boolean = false) => {
-    if (targetSelectedIds.length === 0) return;
+  const updateSelectedImageZIndex = useCallback((targetSelectedId: string | null, sync: boolean = false) => {
+    if (!targetSelectedId) return;
 
     const updateZIndex = () => {
       setImages(prev => {
@@ -90,39 +90,19 @@ const Canvas: React.FC<CanvasProps> = ({
           }
         }
 
-        // ✅ 性能优化：使用 Set 进行 O(1) 查找，而不是 O(n) 的 indexOf
-        const selectedSet = new Set(targetSelectedIds);
-        const selectedIndexMap = new Map<string, number>();
-        targetSelectedIds.forEach((id, index) => {
-          selectedIndexMap.set(id, index);
-        });
+        // 检查选中的图片是否需要更新 zIndex
+        const selectedImg = prev.find(img => img.id === targetSelectedId);
+        if (!selectedImg) return prev;
 
-        // ✅ 性能优化：单次遍历检查是否需要更新
-        let needsUpdate = false;
-        for (const img of prev) {
-          if (selectedSet.has(img.id)) {
-            const index = selectedIndexMap.get(img.id)!;
-            if (img.zIndex !== maxZIndex + index + 1) {
-              needsUpdate = true;
-              break;
-            }
-          }
-        }
+        // 如果已经是最大 zIndex，不需要更新
+        if (selectedImg.zIndex === maxZIndex + 1) return prev;
 
-        // 如果没有需要更新的，直接返回原数组（避免不必要的状态更新）
-        if (!needsUpdate) return prev;
-
-        // ✅ 性能优化：单次遍历更新 zIndex
         // 更新选中图片的 zIndex，使其在最上层
-        // 多个图片选中时，按选中顺序设置 zIndex，最后选中的在最上层
         return prev.map(img => {
-          if (selectedSet.has(img.id)) {
-            const index = selectedIndexMap.get(img.id)!;
-            // 选中的图片：根据在选中数组中的位置设置 zIndex
-            // 最后选中的图片（数组最后一个）zIndex 最大
+          if (img.id === targetSelectedId) {
             return {
               ...img,
-              zIndex: maxZIndex + index + 1
+              zIndex: maxZIndex + 1
             };
           }
           return img;
@@ -142,24 +122,24 @@ const Canvas: React.FC<CanvasProps> = ({
   // 当选中图片时，自动将选中的图片提升到最上层
   // ✅ 性能优化：拖动时立即同步更新 zIndex，非拖动时异步更新避免阻塞
   useEffect(() => {
-    if (selectedImageIds.length === 0) return;
+    if (!selectedImageId) return;
 
     // 如果正在拖动，立即同步更新（避免拖动卡顿）
     if (isDraggingRef.current) {
-      updateSelectedImagesZIndex(selectedImageIds, true);
+      updateSelectedImageZIndex(selectedImageId, true);
       return;
     }
 
     // 否则使用 requestAnimationFrame 异步更新（避免阻塞主进程）
     const rafId = requestAnimationFrame(() => {
-      updateSelectedImagesZIndex(selectedImageIds, true);
+      updateSelectedImageZIndex(selectedImageId, true);
     });
 
     // 清理函数：如果组件卸载或依赖变化，取消待执行的更新
     return () => {
       cancelAnimationFrame(rafId);
     };
-  }, [selectedImageIds, updateSelectedImagesZIndex]); // 依赖 selectedImageIds 和 updateSelectedImagesZIndex
+  }, [selectedImageId, updateSelectedImageZIndex]);
 
   // 扩图模式状态（需要在 useEffect 之前声明）
   const [expandingImageId, setExpandingImageId] = useState<string | null>(null);
@@ -169,47 +149,119 @@ const Canvas: React.FC<CanvasProps> = ({
   const [dragStartPoint, setDragStartPoint] = useState<Point>({ x: 0, y: 0 });
   const [expandStartOffsets, setExpandStartOffsets] = useState<ExpandOffsets>({ top: 0, right: 0, bottom: 0, left: 0 });
 
-  // Internal Clipboard for Copy/Paste shortcuts
-  const [internalClipboard, setInternalClipboard] = useState<CanvasImage[]>([]);
+  // 智能辅助线状态
+  interface SmartGuide {
+    type: 'equal' | 'near'; // 相等或接近
+    edges: string[]; // 相关的边（如 ['top', 'bottom']）
+    distance: number; // 相等的距离值
+    timestamp: number; // 添加时间戳，用于延迟消失
+  }
+  const [smartGuides, setSmartGuides] = useState<SmartGuide[]>([]);
+  
+  // 磁吸阈值（像素）：当距离差小于此值时自动对齐
+  const SNAP_THRESHOLD = 5;
+  
+  // 辅助线延迟消失时间（毫秒）：拖动停止后保持显示的时间
+  const GUIDE_FADE_DELAY = 500;
 
   // ✅ 性能优化：使用索引加速查找
   const imageIndex = useMemo(() => new ImageIndex(images), [images]);
   
-  // ✅ 性能优化：使用 Set 加速 id 查找
-  const selectedImageIdsSet = useMemo(() => new Set(selectedImageIds), [selectedImageIds]);
-
-  // --- Unified Copy Logic ---
+  // 用于存储图片元素的 ref，用于自动触发点击
+  const imageRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  
+  // 跟踪上一次的 selectedImageId，用于检测新选中的图片
+  const prevSelectedImageIdRef = useRef<string | null>(null);
+  
+  // 当 selectedImageId 变化且图片存在时，自动触发选中效果（模拟点击）
+  useEffect(() => {
+    if (!selectedImageId) {
+      prevSelectedImageIdRef.current = null;
+      return;
+    }
+    
+    // 检查图片是否存在于 images 中
+    const imageExists = images.some(img => img.id === selectedImageId);
+    if (!imageExists) {
+      prevSelectedImageIdRef.current = selectedImageId;
+      return;
+    }
+    
+    // 检查是否是新的选中（从 null 变为某个 id，或从其他 id 变为当前 id）
+    const isNewSelection = prevSelectedImageIdRef.current !== selectedImageId;
+    
+    if (isNewSelection) {
+      // 使用 requestAnimationFrame 确保 DOM 已经更新
+      requestAnimationFrame(() => {
+        const imageElement = imageRefs.current.get(selectedImageId);
+        if (imageElement) {
+          // 确保容器获得焦点，这样键盘快捷键才能工作
+          containerRef.current?.focus();
+          
+          // 使用 setTimeout 确保在下一帧执行，让状态更新完成
+          setTimeout(() => {
+            // 创建一个合成鼠标事件，模拟点击但不触发拖动
+            const mouseDownEvent = new MouseEvent('mousedown', {
+              bubbles: true,
+              cancelable: true,
+              view: window,
+              button: 0,
+              buttons: 0, // 设置为 0 表示没有按下任何按钮，这样不会触发拖动
+              clientX: 0,
+              clientY: 0,
+            });
+            
+            // 触发 mousedown 事件
+            imageElement.dispatchEvent(mouseDownEvent);
+            
+            // 立即触发 mouseup 事件，确保鼠标状态被释放
+            // 使用更短的延迟确保在用户可能拖动之前完成
+            setTimeout(() => {
+              const mouseUpEvent = new MouseEvent('mouseup', {
+                bubbles: true,
+                cancelable: true,
+                view: window,
+                button: 0,
+                buttons: 0,
+                clientX: 0,
+                clientY: 0,
+              });
+              imageElement.dispatchEvent(mouseUpEvent);
+            }, 0);
+          }, 10);
+        }
+      });
+    }
+    
+    prevSelectedImageIdRef.current = selectedImageId;
+  }, [selectedImageId, images]);
+  
+  // --- Copy Logic ---
   /**
-   * 复制图片到剪贴板
-   * @param targetIds 要复制的图片 ID 数组
+   * 复制图片到系统剪贴板
+   * @param targetId 要复制的图片 ID
    */
-  const handleCopyImages = useCallback(async (targetIds: string[]) => {
+  const handleCopyImage = useCallback(async (targetId: string) => {
     try {
-      // ✅ 使用索引批量查找，O(n) 而不是 O(n²)
-      const targets = imageIndex.getMany(targetIds);
-      if (targets.length === 0) {
+      const target = imageIndex.get(targetId);
+      if (!target) {
         console.warn('没有找到要复制的图片');
         return;
       }
 
-      // 1. 更新内部剪贴板
-      setInternalClipboard(targets);
-
-      // 2. 更新系统剪贴板（仅主图片）
-      const primaryImg = targets[targets.length - 1];
-      
-      try {
-        const blob = await getPngBlob(primaryImg.src);
-        await navigator.clipboard.write([
-          new ClipboardItem({ 'image/png': blob })
-        ]);
-      } catch (err) {
-        // 系统剪贴板写入失败不影响内部复制功能
-        console.warn('系统剪贴板写入失败（内部复制仍可用）:', err);
+      // 更新系统剪贴板
+    try {
+        const blob = await getPngBlob(target.src);
+      await navigator.clipboard.write([
+        new ClipboardItem({ 'image/png': blob })
+      ]);
+    } catch (err) {
+        console.warn('系统剪贴板写入失败:', err);
+        return;
       }
 
-      // 3. 视觉反馈
-      setCopiedId(primaryImg.id);
+      // 视觉反馈
+      setCopiedId(target.id);
       // 使用定时器显示复制成功提示，2秒后自动清除
       const timer = setTimeout(() => setCopiedId(null), 2000);
       // 注意：这里不需要清理定时器，因为组件卸载时会自动清理状态
@@ -238,7 +290,7 @@ const Canvas: React.FC<CanvasProps> = ({
             const base64 = ev.target?.result as string;
             if (base64) {
               onImportImage(base64);
-            }
+    }
           };
           reader.readAsDataURL(file);
         }
@@ -305,114 +357,59 @@ const Canvas: React.FC<CanvasProps> = ({
     document.addEventListener('paste', handleDocumentPaste, true);
     return () => {
       document.removeEventListener('paste', handleDocumentPaste, true);
-    };
+  };
   }, [onImportImage]);
 
   // --- Keyboard Shortcuts ---
   /**
    * 处理键盘快捷键
-   * 支持删除、复制、粘贴、复制、全选等操作
+   * 支持删除、复制、粘贴、复制等操作
    */
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     // Delete
     if (e.key === 'Delete' || e.key === 'Backspace') {
-      if (selectedImageIds.length > 0) {
-        setImages(prev => prev.filter(img => !selectedImageIds.includes(img.id)));
-        setSelectedImageIds([]);
+      if (selectedImageId) {
+        setImages(prev => prev.filter(img => img.id !== selectedImageId));
+        setSelectedImageId(null);
       }
     }
 
     // Copy (Ctrl+C)
     if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
-      if (selectedImageIds.length > 0) {
+      if (selectedImageId) {
         e.preventDefault();
-        handleCopyImages(selectedImageIds);
+        handleCopyImage(selectedImageId);
       }
     }
 
-    // Paste (Ctrl+V)
-    if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
-      // 1. 优先处理内部剪贴板（画布内复制的图片）
-      if (internalClipboard.length > 0) {
-        e.preventDefault();
-        
-        const newImages = internalClipboard.map(img => ({
-          ...img,
-          id: generateId(),
-          x: img.x + 40, // Offset pasted images
-          y: img.y + 40,
-          zIndex: images.length + 1
-        }));
-        
-        const maxZ = Math.max(...images.map(i => i.zIndex), 0);
-        newImages.forEach((img, idx) => img.zIndex = maxZ + idx + 1);
-
-        setImages(prev => [...prev, ...newImages]);
-        setSelectedImageIds(newImages.map(img => img.id));
-        return;
-      }
-      
-      // 2. 如果没有内部剪贴板，尝试读取系统剪贴板
-      // 注意：这需要用户授权，如果失败则让 document 级别的监听器处理
-      if (navigator.clipboard && navigator.clipboard.read) {
-        e.preventDefault();
-        navigator.clipboard.read().then((clipboardItems) => {
-          for (const item of clipboardItems) {
-            for (const type of item.types) {
-              if (type.startsWith('image/')) {
-                item.getType(type).then((blob) => {
-                  const reader = new FileReader();
-                  reader.onload = (ev) => {
-                    const base64 = ev.target?.result as string;
-                    if (base64) {
-                      onImportImage(base64);
-                    }
-                  };
-                  reader.readAsDataURL(blob);
-                });
-                return;
-              }
-            }
-          }
-        }).catch((err) => {
-          // 如果读取失败（例如权限被拒绝），让 document 级别的监听器处理
-          console.warn('读取系统剪贴板失败，尝试使用 paste 事件:', err);
-        });
-      }
-      // 如果没有 Clipboard API，让 document 级别的监听器处理
-    }
+    // Paste (Ctrl+V) - 系统剪贴板由 document 级别的监听器处理
+    // 这里不需要处理，让 paste 事件正常触发
 
     // Duplicate (Ctrl+D)
     if ((e.ctrlKey || e.metaKey) && e.key === 'd') {
       e.preventDefault();
-      if (selectedImageIds.length > 0) {
-        // ✅ 使用索引批量查找，O(n) 而不是 O(n²)
-        const selectedImages = imageIndex.getMany(selectedImageIds);
+      if (selectedImageId) {
+        const selectedImage = imageIndex.get(selectedImageId);
+        if (selectedImage) {
         // ✅ 使用索引获取所有图片来计算 maxZ，避免重复遍历
         const allImages = imageIndex.getAll();
         const maxZ = allImages.length > 0 
           ? Math.max(...allImages.map(i => i.zIndex), 0)
           : 0;
         
-        const newImages = selectedImages.map((img, idx) => ({
-          ...img,
+          const newImage = {
+            ...selectedImage,
           id: generateId(),
-          x: img.x + 40,
-          y: img.y + 40,
-          zIndex: maxZ + idx + 1
-        }));
-        setImages(prev => [...prev, ...newImages]);
-        setSelectedImageIds(newImages.map(img => img.id));
+            x: selectedImage.x + 40,
+            y: selectedImage.y + 40,
+            zIndex: maxZ + 1
+          };
+          setImages(prev => [...prev, newImage]);
+          setSelectedImageId(newImage.id);
       }
     }
-
-    // Select All (Ctrl+A)
-    if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
-      e.preventDefault();
-      // ✅ 使用索引获取所有 id，已按 zIndex 排序
-      setSelectedImageIds(imageIndex.getAllIds());
     }
-  }, [selectedImageIds, internalClipboard, images, imageIndex, handleCopyImages, setImages, setSelectedImageIds]);
+  }, [selectedImageId, imageIndex, handleCopyImage, setImages, setSelectedImageId]);
 
   // --- Wheel Zoom ---
   /**
@@ -496,16 +493,15 @@ const Canvas: React.FC<CanvasProps> = ({
       e.stopPropagation();
       
       // 如果正在扩图模式，阻止图片拖动（但允许选择）
-      if (expandingImageId === imageId && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
+      if (expandingImageId === imageId) {
         // 只允许选择，不允许拖动
-        const isSelected = selectedImageIds.includes(imageId);
-        if (!isSelected) {
-          setSelectedImageIds([imageId]);
+        if (selectedImageId !== imageId) {
+          setSelectedImageId(imageId);
         }
         return;
       }
       
-      const isSelected = selectedImageIds.includes(imageId);
+      const isSelected = selectedImageId === imageId;
       
       // 检测 Alt 键：如果按住 Alt，启用拖出模式，不进行画布内移动
       // 使用 ref 和事件对象双重检查，确保准确性
@@ -526,30 +522,15 @@ const Canvas: React.FC<CanvasProps> = ({
       // 这样当选中状态变化时，zIndex 会立即同步更新，避免拖动时的卡顿
       isDraggingRef.current = true;
       
-      let newSelectedIds: string[];
-      if (e.shiftKey || e.ctrlKey || e.metaKey) {
-        // Toggle selection
-        if (isSelected) {
-          newSelectedIds = selectedImageIds.filter(id => id !== imageId);
-        } else {
-          newSelectedIds = [...selectedImageIds, imageId];
-        }
-      } else {
-        // If not holding modifier...
+      // 单选逻辑：点击图片就选中它
         if (!isSelected) {
-          // If clicking an unselected item, select ONLY it
-          newSelectedIds = [imageId];
-        } else {
-          // If clicking an already selected item, keep selection as is (allows dragging group)
-          newSelectedIds = selectedImageIds;
-        }
+        setSelectedImageId(imageId);
       }
 
       // ✅ 性能优化：立即同步更新 zIndex，确保拖动开始时 zIndex 已经更新完成
       // 这样拖动操作可以立即开始，不会因为 zIndex 更新延迟而导致卡顿
-      updateSelectedImagesZIndex(newSelectedIds, true);
-      
-      setSelectedImageIds(newSelectedIds);
+      updateSelectedImageZIndex(imageId, true);
+
       setIsDraggingImage(true);
       setDragStart({ x: e.clientX, y: e.clientY });
     } 
@@ -558,9 +539,7 @@ const Canvas: React.FC<CanvasProps> = ({
       setIsDraggingCanvas(true);
       setDragStart({ x: e.clientX, y: e.clientY });
       // Deselect if clicking empty space
-      if (!e.shiftKey && !e.ctrlKey) {
-        setSelectedImageIds([]);
-      }
+      setSelectedImageId(null);
       setShowExtractMenu(false);
       // 退出扩图模式
       if (expandingImageId) {
@@ -655,21 +634,15 @@ const Canvas: React.FC<CanvasProps> = ({
           : img
       ));
 
-    } else if (isDraggingImage && selectedImageIds.length > 0) {
+    } else if (isDraggingImage && selectedImageId) {
       const dx = (e.clientX - dragStart.x) / scale;
       const dy = (e.clientY - dragStart.y) / scale;
       
-      // ✅ 性能优化：在函数式更新中直接使用最新的 selectedImageIds 创建 Set
-      // 这样可以确保即使选中状态在拖动过程中变化，也能使用最新的状态
-      setImages(prev => {
-        // 在函数式更新中创建 Set，确保使用最新的选中状态
-        const selectedSet = new Set(selectedImageIds);
-        return prev.map(img => 
-          selectedSet.has(img.id)
-            ? { ...img, x: img.x + dx, y: img.y + dy } 
-            : img
-        );
-      });
+      setImages(prev => prev.map(img => 
+        img.id === selectedImageId
+          ? { ...img, x: img.x + dx, y: img.y + dy } 
+          : img
+      ));
       setDragStart({ x: e.clientX, y: e.clientY });
 
     } else if (isDraggingCanvas) {
@@ -870,6 +843,63 @@ const Canvas: React.FC<CanvasProps> = ({
     }
   }, []);
 
+  /**
+   * 检测智能辅助线：检测当前拖动的边是否与其他边相等或接近
+   * @param offsets 当前的扩展偏移量
+   * @param draggingEdge 当前正在拖动的边（'top' | 'right' | 'bottom' | 'left'）
+   * @returns 检测到的智能辅助线数组
+   */
+  const detectSmartGuides = (offsets: ExpandOffsets, draggingEdge: string): SmartGuide[] => {
+    const guides: SmartGuide[] = [];
+    const edges = ['top', 'right', 'bottom', 'left'] as const;
+    const edgeValues = {
+      top: offsets.top,
+      right: offsets.right,
+      bottom: offsets.bottom,
+      left: offsets.left
+    };
+        
+    // 获取当前拖动的边的值
+    const currentValue = edgeValues[draggingEdge as keyof typeof edgeValues];
+    
+    // 如果当前值为0或太小，不显示辅助线
+    if (currentValue < 1) {
+      return guides;
+    }
+
+    // 检测与其他边的相等关系
+    for (const edge of edges) {
+      if (edge === draggingEdge) continue; // 跳过当前拖动的边
+      
+      const otherValue = edgeValues[edge];
+      // 如果另一条边为0，跳过（不显示辅助线）
+      if (otherValue < 1) continue;
+      
+      const diff = Math.abs(currentValue - otherValue);
+        
+      // 如果完全相等（差值小于1像素，放宽阈值以便更容易触发）
+      if (diff < 1) {
+        guides.push({
+          type: 'equal',
+          edges: [draggingEdge, edge],
+          distance: currentValue,
+          timestamp: Date.now()
+        });
+      }
+      // 如果接近相等（在磁吸阈值内）
+      else if (diff <= SNAP_THRESHOLD) {
+        guides.push({
+          type: 'near',
+          edges: [draggingEdge, edge],
+          distance: otherValue, // 使用已存在的边的值作为目标值
+          timestamp: Date.now()
+        });
+      }
+    }
+
+    return guides;
+  };
+
   // 处理扩图控制点拖动开始
   const handleExpandHandleMouseDown = (e: React.MouseEvent, handleType: string) => {
     e.stopPropagation();
@@ -877,6 +907,7 @@ const Canvas: React.FC<CanvasProps> = ({
     setDraggingHandleType(handleType);
     setDragStartPoint({ x: e.clientX, y: e.clientY });
     setExpandStartOffsets({ ...expandOffsets });
+    setSmartGuides([]); // 重置辅助线
   };
 
   // 处理扩图控制点拖动
@@ -971,12 +1002,128 @@ const Canvas: React.FC<CanvasProps> = ({
           break;
       }
 
+      // 智能辅助线检测和磁吸效果
+      // 确定当前拖动的边（用于检测）
+      let currentDraggingEdge: string = '';
+      if (draggingHandleType === 'top' || draggingHandleType === 'top-left' || draggingHandleType === 'top-right') {
+        currentDraggingEdge = 'top';
+      } else if (draggingHandleType === 'right' || draggingHandleType === 'top-right' || draggingHandleType === 'bottom-right') {
+        currentDraggingEdge = 'right';
+      } else if (draggingHandleType === 'bottom' || draggingHandleType === 'bottom-left' || draggingHandleType === 'bottom-right') {
+        currentDraggingEdge = 'bottom';
+      } else if (draggingHandleType === 'left' || draggingHandleType === 'top-left' || draggingHandleType === 'bottom-left') {
+        currentDraggingEdge = 'left';
+      }
+
+      // 对于四角拖动，需要检测两条边
+      const detectedGuides: SmartGuide[] = [];
+      if (draggingHandleType === 'top-left') {
+        // 检测 top 和 left 两条边
+        detectedGuides.push(...detectSmartGuides(newOffsets, 'top'));
+        detectedGuides.push(...detectSmartGuides(newOffsets, 'left'));
+      } else if (draggingHandleType === 'top-right') {
+        detectedGuides.push(...detectSmartGuides(newOffsets, 'top'));
+        detectedGuides.push(...detectSmartGuides(newOffsets, 'right'));
+      } else if (draggingHandleType === 'bottom-left') {
+        detectedGuides.push(...detectSmartGuides(newOffsets, 'bottom'));
+        detectedGuides.push(...detectSmartGuides(newOffsets, 'left'));
+      } else if (draggingHandleType === 'bottom-right') {
+        detectedGuides.push(...detectSmartGuides(newOffsets, 'bottom'));
+        detectedGuides.push(...detectSmartGuides(newOffsets, 'right'));
+      } else if (currentDraggingEdge) {
+        // 单边拖动
+        detectedGuides.push(...detectSmartGuides(newOffsets, currentDraggingEdge));
+      }
+
+      // 应用磁吸效果：当接近相等时自动对齐
+      for (const guide of detectedGuides) {
+        if (guide.type === 'near') {
+          // 对于四角拖动，需要特殊处理
+          if (draggingHandleType === 'top-left') {
+            // 检测 top 和 left 是否分别与其他边接近
+            if (guide.edges.includes('top') && guide.edges.includes('bottom')) {
+              newOffsets.top = guide.distance;
+            } else if (guide.edges.includes('top') && guide.edges.includes('right')) {
+              newOffsets.top = guide.distance;
+            } else if (guide.edges.includes('left') && guide.edges.includes('right')) {
+              newOffsets.left = guide.distance;
+            } else if (guide.edges.includes('left') && guide.edges.includes('bottom')) {
+              newOffsets.left = guide.distance;
+            }
+          } else if (draggingHandleType === 'top-right') {
+            if (guide.edges.includes('top') && guide.edges.includes('bottom')) {
+              newOffsets.top = guide.distance;
+            } else if (guide.edges.includes('top') && guide.edges.includes('left')) {
+              newOffsets.top = guide.distance;
+            } else if (guide.edges.includes('right') && guide.edges.includes('left')) {
+              newOffsets.right = guide.distance;
+            } else if (guide.edges.includes('right') && guide.edges.includes('bottom')) {
+              newOffsets.right = guide.distance;
+            }
+          } else if (draggingHandleType === 'bottom-left') {
+            if (guide.edges.includes('bottom') && guide.edges.includes('top')) {
+              newOffsets.bottom = guide.distance;
+            } else if (guide.edges.includes('bottom') && guide.edges.includes('right')) {
+              newOffsets.bottom = guide.distance;
+            } else if (guide.edges.includes('left') && guide.edges.includes('right')) {
+              newOffsets.left = guide.distance;
+            } else if (guide.edges.includes('left') && guide.edges.includes('top')) {
+              newOffsets.left = guide.distance;
+            }
+          } else if (draggingHandleType === 'bottom-right') {
+            if (guide.edges.includes('bottom') && guide.edges.includes('top')) {
+              newOffsets.bottom = guide.distance;
+            } else if (guide.edges.includes('bottom') && guide.edges.includes('left')) {
+              newOffsets.bottom = guide.distance;
+            } else if (guide.edges.includes('right') && guide.edges.includes('left')) {
+              newOffsets.right = guide.distance;
+            } else if (guide.edges.includes('right') && guide.edges.includes('top')) {
+              newOffsets.right = guide.distance;
+            }
+          } else {
+            // 单边拖动：直接对齐
+            const targetEdge = guide.edges.find(e => e !== currentDraggingEdge);
+            if (targetEdge && currentDraggingEdge) {
+              if (currentDraggingEdge === 'top') {
+                newOffsets.top = guide.distance;
+              } else if (currentDraggingEdge === 'right') {
+                newOffsets.right = guide.distance;
+              } else if (currentDraggingEdge === 'bottom') {
+                newOffsets.bottom = guide.distance;
+              } else if (currentDraggingEdge === 'left') {
+                newOffsets.left = guide.distance;
+              }
+            }
+          }
+        }
+      }
+
+      // 更新辅助线状态（只显示完全相等的辅助线，不显示接近的）
+      const equalGuides = detectedGuides.filter(g => g.type === 'equal');
+      
+      // 去重：避免重复的辅助线，并添加时间戳
+      const uniqueGuides = equalGuides
+        .filter((guide, index, self) => {
+          const guideKey = guide.edges.sort().join('-');
+          return index === self.findIndex(g => g.edges.sort().join('-') === guideKey);
+        })
+        .map(guide => ({
+          ...guide,
+          timestamp: Date.now() // 添加时间戳
+        }));
+      
+      setSmartGuides(uniqueGuides);
+
       setExpandOffsets(newOffsets);
     };
 
     const handleMouseUp = () => {
       setIsDraggingExpandHandle(false);
       setDraggingHandleType(null);
+      // 拖动结束时延迟清除辅助线，让用户有时间看到
+      setTimeout(() => {
+        setSmartGuides([]);
+      }, GUIDE_FADE_DELAY);
     };
 
     document.addEventListener('mousemove', handleMouseMove);
@@ -1064,22 +1211,22 @@ const Canvas: React.FC<CanvasProps> = ({
     // 只有真正的文件拖拽才处理上传
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
       try {
-        const files = Array.from(e.dataTransfer.files);
-        const rect = containerRef.current?.getBoundingClientRect();
+      const files = Array.from(e.dataTransfer.files);
+      const rect = containerRef.current?.getBoundingClientRect();
         if (!rect) {
           console.warn('无法获取容器位置信息');
           return;
         }
         
-        const dropX = (e.clientX - rect.left - viewport.x) / viewport.zoom;
-        const dropY = (e.clientY - rect.top - viewport.y) / viewport.zoom;
+      const dropX = (e.clientX - rect.left - viewport.x) / viewport.zoom;
+      const dropY = (e.clientY - rect.top - viewport.y) / viewport.zoom;
         
-        files.forEach((file: File) => {
-          if (file.type.startsWith('image/')) {
-            const reader = new FileReader();
-            reader.onload = (ev) => {
+      files.forEach((file: File) => {
+        if (file.type.startsWith('image/')) {
+          const reader = new FileReader();
+          reader.onload = (ev) => {
               try {
-                const base64 = ev.target?.result as string;
+            const base64 = ev.target?.result as string;
                 if (base64) {
                   onImportImage(base64, dropX, dropY);
                 } else {
@@ -1091,19 +1238,18 @@ const Canvas: React.FC<CanvasProps> = ({
             };
             reader.onerror = () => {
               console.error('文件读取失败:', file.name);
-            };
-            reader.readAsDataURL(file);
-          }
-        });
+          };
+          reader.readAsDataURL(file);
+        }
+      });
       } catch (error) {
         console.error('处理文件拖拽失败:', error);
-      }
+    }
     }
   }, [viewport, onImportImage]);
 
   // Determine valid selection state for UI
-  const selectionCount = selectedImageIds.length;
-  const primarySelectedId = selectionCount > 0 ? selectedImageIds[selectionCount - 1] : null;
+  const primarySelectedId = selectedImageId;
 
   return (
     <div 
@@ -1138,15 +1284,20 @@ const Canvas: React.FC<CanvasProps> = ({
         }}
       >
         {images.map((img) => {
-          // ✅ 使用 Set 进行 O(1) 查找，而不是 O(n) 的 includes
-          const isSelected = selectedImageIdsSet.has(img.id);
-          // Show menu only on the primary (last) selected item to avoid clutter
+          const isSelected = selectedImageId === img.id;
           const showMenu = isSelected && img.id === primarySelectedId;
           const isExpanding = expandingImageId === img.id;
 
           return (
             <div
               key={img.id}
+              ref={(el) => {
+                if (el) {
+                  imageRefs.current.set(img.id, el);
+                } else {
+                  imageRefs.current.delete(img.id);
+                }
+              }}
               className={`absolute group hover:ring-1 hover:ring-slate-500 transition-shadow duration-100 ${isDraggingToSidebar ? 'opacity-50' : ''}`}
               style={{
                 left: img.x,
@@ -1196,10 +1347,12 @@ const Canvas: React.FC<CanvasProps> = ({
 
       {/* Floating UI Elements (不受缩放影响) */}
       {images.map((img) => {
-        const isSelected = selectedImageIdsSet.has(img.id);
+        const isSelected = selectedImageId === img.id;
         const showMenu = isSelected && img.id === primarySelectedId;
+        const isExpanding = expandingImageId === img.id;
         
-        if (!isSelected) return null;
+        // 只有在选中或扩图模式下才渲染 UI 元素
+        if (!isSelected && !isExpanding) return null;
 
         // 计算图片在屏幕上的实际位置（考虑 viewport 的 transform）
         const screenX = viewport.x + img.x * viewport.zoom;
@@ -1207,8 +1360,6 @@ const Canvas: React.FC<CanvasProps> = ({
         const screenWidth = img.width * viewport.zoom;
         const screenHeight = img.height * viewport.zoom;
 
-        const isExpanding = expandingImageId === img.id;
-        
         // 计算控制点位置的辅助函数（简化版：容器不旋转，直接使用容器坐标）
         // 由于容器不再旋转，可以直接使用容器坐标系统，无需旋转计算
         const getHandlePosition = (localX: number, localY: number) => {
@@ -1331,6 +1482,225 @@ const Canvas: React.FC<CanvasProps> = ({
                     />
                   );
                 })()}
+                
+                {/* 智能辅助线：显示相等的边 */}
+                {smartGuides.length > 0 && (() => {
+                  // 计算图片在屏幕上的实际位置
+                  const screenX = viewport.x + img.x * viewport.zoom;
+                  const screenY = viewport.y + img.y * viewport.zoom;
+                  const screenWidth = img.width * viewport.zoom;
+                  const screenHeight = img.height * viewport.zoom;
+                  
+                  // 计算扩展后的边界位置（用于确定辅助线的位置）
+                  const expandedLeft = screenX - expandOffsets.left * viewport.zoom;
+                  const expandedTop = screenY - expandOffsets.top * viewport.zoom;
+                  const expandedRight = screenX + screenWidth + expandOffsets.right * viewport.zoom;
+                  const expandedBottom = screenY + screenHeight + expandOffsets.bottom * viewport.zoom;
+                  
+                  // 获取Canvas容器的完整尺寸，使辅助线覆盖整个画布
+                  const containerRect = containerRef.current?.getBoundingClientRect();
+                  const canvasWidth = containerRect ? containerRect.width : window.innerWidth;
+                  const canvasHeight = containerRect ? containerRect.height : window.innerHeight;
+                  
+                  // 使用 Set 避免重复渲染相同的辅助线
+                  const renderedGuides = new Set<string>();
+                  
+                  return smartGuides.map((guide, index) => {
+                    // 创建唯一标识符
+                    const edges = guide.edges.sort();
+                    const guideKey = edges.join('-');
+                    if (renderedGuides.has(guideKey)) {
+                      return null;
+                    }
+                    renderedGuides.add(guideKey);
+                    
+                    // 根据边的组合渲染不同的辅助线
+                    const edgeKey = guideKey;
+                    
+                    if (edgeKey === 'bottom-top' || edgeKey === 'top-bottom') {
+                      // 上下相等：在顶部和底部显示水平辅助线，横跨整个Canvas
+                      return (
+                        <React.Fragment key={`guide-${index}`}>
+                          {/* 顶部辅助线 - 红色，1px，覆盖整个Canvas宽度 */}
+                          <div
+                            className="absolute pointer-events-none"
+                            style={{
+                              left: 0,
+                              top: expandedTop,
+                              width: canvasWidth,
+                              height: 1,
+                              backgroundColor: '#FF0000', // 红色
+                              zIndex: 100,
+                            }}
+                          />
+                          {/* 底部辅助线 - 红色，1px，覆盖整个Canvas宽度 */}
+                          <div
+                            className="absolute pointer-events-none"
+                            style={{
+                              left: 0,
+                              top: expandedBottom,
+                              width: canvasWidth,
+                              height: 1,
+                              backgroundColor: '#FF0000', // 红色
+                              zIndex: 100,
+                            }}
+                          />
+                        </React.Fragment>
+                      );
+                    } else if (edgeKey === 'left-right' || edgeKey === 'right-left') {
+                      // 左右相等：在左侧和右侧显示垂直辅助线，横跨整个Canvas高度
+                      return (
+                        <React.Fragment key={`guide-${index}`}>
+                          {/* 左侧辅助线 - 红色，1px，覆盖整个Canvas高度 */}
+                          <div
+                            className="absolute pointer-events-none"
+                            style={{
+                              left: expandedLeft,
+                              top: 0,
+                              width: 1,
+                              height: canvasHeight,
+                              backgroundColor: '#FF0000', // 红色
+                              zIndex: 100,
+                            }}
+                          />
+                          {/* 右侧辅助线 - 红色，1px，覆盖整个Canvas高度 */}
+                          <div
+                            className="absolute pointer-events-none"
+                            style={{
+                              left: expandedRight,
+                              top: 0,
+                              width: 1,
+                              height: canvasHeight,
+                              backgroundColor: '#FF0000', // 红色
+                              zIndex: 100,
+                            }}
+                          />
+                        </React.Fragment>
+                      );
+                    } else if (edgeKey === 'left-top' || edgeKey === 'top-left') {
+                      // 左上角相等：显示两条辅助线（水平和垂直），横跨整个Canvas
+                      return (
+                        <React.Fragment key={`guide-${index}`}>
+                          {/* 水平辅助线 */}
+                          <div
+                            className="absolute pointer-events-none"
+                            style={{
+                              left: 0,
+                              top: expandedTop,
+                              width: canvasWidth,
+                              height: 1,
+                              backgroundColor: '#FF0000', // 红色
+                              zIndex: 100,
+                            }}
+                          />
+                          {/* 垂直辅助线 */}
+                          <div
+                            className="absolute pointer-events-none"
+                            style={{
+                              left: expandedLeft,
+                              top: 0,
+                              width: 1,
+                              height: canvasHeight,
+                              backgroundColor: '#FF0000', // 红色
+                              zIndex: 100,
+                            }}
+                          />
+                        </React.Fragment>
+                      );
+                    } else if (edgeKey === 'right-top' || edgeKey === 'top-right') {
+                      // 右上角相等：显示两条辅助线
+                      return (
+                        <React.Fragment key={`guide-${index}`}>
+                          {/* 水平辅助线 */}
+                          <div
+                            className="absolute pointer-events-none"
+                            style={{
+                              left: 0,
+                              top: expandedTop,
+                              width: canvasWidth,
+                              height: 1,
+                              backgroundColor: '#FF0000', // 红色
+                              zIndex: 100,
+                            }}
+                          />
+                          {/* 垂直辅助线 */}
+                          <div
+                            className="absolute pointer-events-none"
+                            style={{
+                              left: expandedRight,
+                              top: 0,
+                              width: 1,
+                              height: canvasHeight,
+                              backgroundColor: '#FF0000', // 红色
+                              zIndex: 100,
+                            }}
+                          />
+                        </React.Fragment>
+                      );
+                    } else if (edgeKey === 'bottom-left' || edgeKey === 'left-bottom') {
+                      // 左下角相等：显示两条辅助线
+                      return (
+                        <React.Fragment key={`guide-${index}`}>
+                          {/* 水平辅助线 */}
+                          <div
+                            className="absolute pointer-events-none"
+                            style={{
+                              left: 0,
+                              top: expandedBottom,
+                              width: canvasWidth,
+                              height: 1,
+                              backgroundColor: '#FF0000', // 红色
+                              zIndex: 100,
+                            }}
+                          />
+                          {/* 垂直辅助线 */}
+                          <div
+                            className="absolute pointer-events-none"
+                            style={{
+                              left: expandedLeft,
+                              top: 0,
+                              width: 1,
+                              height: canvasHeight,
+                              backgroundColor: '#FF0000', // 红色
+                              zIndex: 100,
+                            }}
+                          />
+                        </React.Fragment>
+                      );
+                    } else if (edgeKey === 'bottom-right' || edgeKey === 'right-bottom') {
+                      // 右下角相等：显示两条辅助线
+                      return (
+                        <React.Fragment key={`guide-${index}`}>
+                          {/* 水平辅助线 */}
+                          <div
+                            className="absolute pointer-events-none"
+                            style={{
+                              left: 0,
+                              top: expandedBottom,
+                              width: canvasWidth,
+                              height: 1,
+                              backgroundColor: '#FF0000', // 红色
+                              zIndex: 100,
+                            }}
+                          />
+                          {/* 垂直辅助线 */}
+                          <div
+                            className="absolute pointer-events-none"
+                            style={{
+                              left: expandedRight,
+                              top: 0,
+                              width: 1,
+                              height: canvasHeight,
+                              backgroundColor: '#FF0000', // 红色
+                              zIndex: 100,
+                            }}
+                          />
+                        </React.Fragment>
+                      );
+                    }
+                    return null;
+                  });
+                })()}
               </>
             )}
 
@@ -1434,7 +1804,7 @@ const Canvas: React.FC<CanvasProps> = ({
                     <button 
                       onClick={(e) => handleActionClick(e, img.id, 'edit')}
                       className="p-1.5 hover:bg-blue-600 rounded text-slate-300 hover:text-white transition-colors"
-                      title={selectionCount > 1 ? "编辑所有选中图片" : "编辑"}
+                      title="编辑"
                     >
                       <Edit size={14} />
                     </button>
@@ -1476,7 +1846,7 @@ const Canvas: React.FC<CanvasProps> = ({
                     <button 
                       onClick={(e) => handleActionClick(e, img.id, 'enhance')}
                       className="p-1.5 hover:bg-blue-600 rounded text-slate-300 hover:text-white transition-colors"
-                      title={selectionCount > 1 ? "变清晰所有选中图片" : "变清晰"}
+                      title="变清晰"
                     >
                       <Sparkles size={14} />
                     </button>
@@ -1493,14 +1863,10 @@ const Canvas: React.FC<CanvasProps> = ({
                     <button 
                       onClick={(e) => { 
                         e.stopPropagation(); 
-                        if (selectedImageIds.includes(img.id)) {
-                          handleCopyImages(selectedImageIds);
-                        } else {
-                          handleCopyImages([img.id]);
-                        }
+                        handleCopyImage(img.id);
                       }}
                       className="p-1.5 hover:bg-blue-600 rounded text-slate-300 hover:text-white transition-colors"
-                      title={selectionCount > 1 ? "复制选中图片 (原图)" : "复制原图"}
+                      title="复制原图"
                     >
                       {copiedId === img.id ? <Check size={14} className="text-green-400" /> : <Copy size={14} />}
                     </button>
@@ -1537,12 +1903,6 @@ const Canvas: React.FC<CanvasProps> = ({
           {viewport.zoom > 1 ? <ZoomIn size={12} /> : <ZoomOut size={12} />}
           <span>{Math.round(viewport.zoom * 100)}%</span>
         </div>
-        {selectionCount > 0 && (
-          <div className="flex items-center gap-1 text-blue-400 border-l border-slate-600 pl-4">
-            <MousePointer2 size={12} />
-            <span>Selected: {selectionCount}</span>
-          </div>
-        )}
       </div>
       
       {/* Drop overlay hint */}
