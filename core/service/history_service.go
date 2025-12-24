@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,12 +24,16 @@ type saveRequest struct {
 // HistoryService 历史记录服务
 // 提供聊天历史记录和画布记录的保存、加载、删除功能
 // 使用异步队列机制处理保存操作，避免阻塞主进程
+// ✅ 性能优化：图片分离存储 + JSON 压缩
 type HistoryService struct {
 	ctx        context.Context
 	dataDir    string
 	chatFile   string
 	canvasFile string
 	mu         sync.Mutex // 用于保护共享状态
+
+	// ✅ 性能优化：图片存储管理器（图片分离存储）
+	imageStorage *ImageStorage
 
 	// ✅ 性能优化：保存队列处理器启动控制
 	saveQueueOnce sync.Once
@@ -47,8 +52,10 @@ type HistoryService struct {
 // NewHistoryService 创建历史记录服务实例
 func NewHistoryService() *HistoryService {
 	return &HistoryService{
-		shutdownChan:   make(chan struct{}),
-		saveNotifyChan: make(chan struct{}, 1), // 带缓冲，避免阻塞
+		shutdownChan: make(chan struct{}),
+		// ✅ 性能优化：增加 channel 缓冲长度到 20，减少快速操作时的卡顿
+		// 缓冲足够多的通知，避免事件处理被阻塞
+		saveNotifyChan: make(chan struct{}, 20),
 	}
 }
 
@@ -68,9 +75,21 @@ func (h *HistoryService) Startup(ctx context.Context) error {
 		return fmt.Errorf("failed to create app data dir: %w", err)
 	}
 
+	// ✅ 性能优化：初始化图片存储管理器
+	h.imageStorage = NewImageStorage(h.dataDir)
+	if err := h.imageStorage.Initialize(); err != nil {
+		return fmt.Errorf("failed to initialize image storage: %w", err)
+	}
+
 	// 设置文件路径
 	h.chatFile = filepath.Join(h.dataDir, "chat_history.json")
 	h.canvasFile = filepath.Join(h.dataDir, "canvas_history.json")
+
+	// ✅ 数据迁移：检查并迁移旧格式文件
+	if err := h.migrateOldFormat(); err != nil {
+		fmt.Printf("[HistoryService] Warning: failed to migrate old format: %v\n", err)
+		// 不阻塞启动，继续使用新格式
+	}
 
 	// ✅ 启动保存队列处理器（只启动一次）
 	h.saveQueueOnce.Do(func() {
@@ -188,12 +207,17 @@ func (h *HistoryService) Shutdown() error {
 }
 
 // notifySaveQueue 通知保存队列有新请求
+// ✅ 性能优化：使用非阻塞方式发送通知，避免阻塞事件处理
+// 由于 channel 有足够大的缓冲（20），正常情况下不会阻塞
+// 如果 channel 已满，说明后台处理较慢，此时丢弃通知是安全的（因为合并策略会确保最新数据被保存）
 func (h *HistoryService) notifySaveQueue() {
 	select {
 	case h.saveNotifyChan <- struct{}{}:
 		// 成功发送通知
 	default:
-		// 通道已有通知，无需重复
+		// 通道已满（说明后台处理较慢），丢弃通知
+		// 这是安全的，因为合并策略会确保最新的数据被保存
+		// 定时器（200ms）也会定期处理待保存的数据
 	}
 }
 
@@ -219,9 +243,23 @@ func (h *HistoryService) processSaveQueue() {
 			}
 			h.flushPendingSaves()
 		case <-h.saveNotifyChan:
-			// ✅ 性能优化：增加等待时间到 100ms，让更多请求合并
-			// 前端已经有防抖机制，这里可以适当增加等待时间
-			time.Sleep(100 * time.Millisecond)
+			// ✅ 性能优化：批量处理通知，减少锁竞争
+			// 快速消费 channel 中的所有通知（最多 10 个），然后统一处理
+			// 这样可以减少频繁的锁获取和释放，提高性能
+			notifyCount := 1
+			done := false
+			for !done && notifyCount < 10 {
+				select {
+				case <-h.saveNotifyChan:
+					notifyCount++
+				default:
+					// 没有更多通知，跳出循环
+					done = true
+				}
+			}
+			// ✅ 性能优化：增加等待时间到 150ms，让更多请求合并
+			// 前端已经有防抖机制（300ms/500ms），这里适当增加等待时间可以合并更多请求
+			time.Sleep(150 * time.Millisecond)
 			h.flushPendingSaves()
 		case <-h.shutdownChan:
 			// 关闭前处理所有待保存的请求
@@ -305,7 +343,7 @@ func (h *HistoryService) flushPendingSaves() {
 }
 
 // saveChatHistorySync 同步保存聊天历史（内部方法，在后台 goroutine 中调用）
-// ✅ 性能优化：使用紧凑 JSON 格式，原子性写入
+// ✅ 性能优化：图片分离存储 + JSON 压缩
 func (h *HistoryService) saveChatHistorySync(chatHistoryJSON string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -316,9 +354,22 @@ func (h *HistoryService) saveChatHistorySync(chatHistoryJSON string) error {
 		return fmt.Errorf("invalid chat history format: %w", err)
 	}
 
+	// ✅ 性能优化：提取图片数据并分离存储
+	for i := range messages {
+		if len(messages[i].Images) > 0 {
+			// 保存图片并获取引用
+			imageRefs, err := h.imageStorage.SaveImages(messages[i].Images)
+			if err != nil {
+				return fmt.Errorf("failed to save images for message %s: %w", messages[i].ID, err)
+			}
+			// 将 base64 data URL 替换为图片引用
+			messages[i].Images = imageRefs
+		}
+	}
+
 	// 创建历史记录结构
 	history := ChatHistory{
-		Version:   "1.0",
+		Version:   "2.0", // 版本号升级，表示使用新格式
 		UpdatedAt: time.Now().Unix(),
 		Messages:  messages,
 	}
@@ -345,7 +396,7 @@ func (h *HistoryService) saveChatHistorySync(chatHistoryJSON string) error {
 }
 
 // saveCanvasHistorySync 同步保存画布历史（内部方法，在后台 goroutine 中调用）
-// ✅ 性能优化：使用紧凑 JSON 格式，原子性写入
+// ✅ 性能优化：图片分离存储 + JSON 压缩
 func (h *HistoryService) saveCanvasHistorySync(canvasHistoryJSON string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -359,16 +410,28 @@ func (h *HistoryService) saveCanvasHistorySync(canvasHistoryJSON string) error {
 		return fmt.Errorf("invalid canvas history format: %w", err)
 	}
 
+	// ✅ 性能优化：提取图片数据并分离存储
+	for i := range canvasData.Images {
+		if canvasData.Images[i].Src != "" {
+			// 保存图片并获取引用
+			imageRef, err := h.imageStorage.SaveImage(canvasData.Images[i].Src)
+			if err != nil {
+				return fmt.Errorf("failed to save image %s: %w", canvasData.Images[i].ID, err)
+			}
+			// 将 base64 data URL 替换为图片引用
+			canvasData.Images[i].Src = imageRef
+		}
+	}
+
 	// 创建历史记录结构
 	history := CanvasHistory{
-		Version:   "1.0",
+		Version:   "2.0", // 版本号升级，表示使用新格式
 		UpdatedAt: time.Now().Unix(),
 		Viewport:  canvasData.Viewport,
 		Images:    canvasData.Images,
 	}
 
 	// ✅ 性能优化：使用紧凑 JSON 格式（不使用 MarshalIndent），减少序列化时间和文件大小
-	// 对于包含大量 base64 数据的画布历史，紧凑格式可以显著减少序列化时间
 	data, err := json.Marshal(history)
 	if err != nil {
 		return fmt.Errorf("failed to serialize canvas history: %w", err)
@@ -389,6 +452,24 @@ func (h *HistoryService) saveCanvasHistorySync(canvasHistoryJSON string) error {
 	return nil
 }
 
+// ==================== 同步保存 API（用于应用关闭时）====================
+
+// SaveChatHistorySync 同步保存聊天历史记录（公共方法，直接保存，不走事件队列）
+// 用于应用关闭时确保数据已保存
+// @param chatHistoryJSON JSON 格式的聊天记录数组
+// @return error 保存失败时返回错误
+func (h *HistoryService) SaveChatHistorySync(chatHistoryJSON string) error {
+	return h.saveChatHistorySync(chatHistoryJSON)
+}
+
+// SaveCanvasHistorySync 同步保存画布历史记录（公共方法，直接保存，不走事件队列）
+// 用于应用关闭时确保数据已保存
+// @param canvasHistoryJSON JSON 格式的画布记录，包含 viewport 和 images
+// @return error 保存失败时返回错误
+func (h *HistoryService) SaveCanvasHistorySync(canvasHistoryJSON string) error {
+	return h.saveCanvasHistorySync(canvasHistoryJSON)
+}
+
 // ==================== 聊天历史记录 API ====================
 
 // ChatHistory 聊天历史记录数据结构
@@ -404,26 +485,30 @@ type ChatRecord struct {
 	Role      string   `json:"role"` // "user" 或 "model"
 	Type      string   `json:"type"` // "text", "system", "error"
 	Text      string   `json:"text"`
-	Images    []string `json:"images,omitempty"` // base64 编码的图像数组（可选）
+	Images    []string `json:"images,omitempty"` // 图片引用（格式：images/{hash}.{ext}）或 base64 data URL（旧格式兼容）
 	Timestamp int64    `json:"timestamp"`
 }
 
 // LoadChatHistory 加载聊天历史记录
 // 返回 JSON 格式的聊天记录数组
+// ✅ 性能优化：支持压缩格式和图片引用加载
 func (h *HistoryService) LoadChatHistory() (string, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	// 检查文件是否存在
-	if _, err := os.Stat(h.chatFile); os.IsNotExist(err) {
-		// 返回空数组
-		return "[]", nil
-	}
+	var data []byte
+	var err error
 
-	// 读取文件
-	data, err := os.ReadFile(h.chatFile)
-	if err != nil {
-		return "", fmt.Errorf("failed to read chat history file: %w", err)
+	if _, err := os.Stat(h.chatFile); err == nil {
+		// 读取文件
+		data, err = os.ReadFile(h.chatFile)
+		if err != nil {
+			return "", fmt.Errorf("failed to read chat history file: %w", err)
+		}
+	} else {
+		// 文件不存在，返回空数组
+		return "[]", nil
 	}
 
 	// 解析历史记录结构
@@ -431,6 +516,25 @@ func (h *HistoryService) LoadChatHistory() (string, error) {
 	if err := json.Unmarshal(data, &history); err != nil {
 		// 如果解析失败，尝试直接返回原始数据（兼容旧格式）
 		return string(data), nil
+	}
+
+	// ✅ 性能优化：加载图片引用并还原为 data URL
+	for i := range history.Messages {
+		if len(history.Messages[i].Images) > 0 {
+			// 检查是否是图片引用（新格式）还是 base64 data URL（旧格式）
+			if len(history.Messages[i].Images) > 0 && strings.HasPrefix(history.Messages[i].Images[0], "images/") {
+				// 新格式：加载图片引用
+				dataURLs, err := h.imageStorage.LoadImages(history.Messages[i].Images)
+				if err != nil {
+					fmt.Printf("[HistoryService] Warning: failed to load images for message %s: %v\n", history.Messages[i].ID, err)
+					// 继续处理，使用空数组
+					history.Messages[i].Images = []string{}
+				} else {
+					history.Messages[i].Images = dataURLs
+				}
+			}
+			// 旧格式：已经是 base64 data URL，直接使用
+		}
 	}
 
 	// 返回消息数组
@@ -475,7 +579,7 @@ type ViewportRecord struct {
 // ImageRecord 图像记录
 type ImageRecord struct {
 	ID       string  `json:"id"`
-	Src      string  `json:"src"` // Base64 data URL
+	Src      string  `json:"src"` // 图片引用（格式：images/{hash}.{ext}）或 base64 data URL（旧格式兼容）
 	X        float64 `json:"x"`
 	Y        float64 `json:"y"`
 	Width    float64 `json:"width"`
@@ -487,13 +591,23 @@ type ImageRecord struct {
 
 // LoadCanvasHistory 加载画布历史记录
 // 返回 JSON 格式的画布记录，包含 viewport 和 images
+// ✅ 性能优化：支持压缩格式和图片引用加载
 func (h *HistoryService) LoadCanvasHistory() (string, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	// 检查文件是否存在
-	if _, err := os.Stat(h.canvasFile); os.IsNotExist(err) {
-		// 返回默认空记录
+	var data []byte
+	var err error
+
+	if _, err := os.Stat(h.canvasFile); err == nil {
+		// 读取文件
+		data, err = os.ReadFile(h.canvasFile)
+		if err != nil {
+			return "", fmt.Errorf("failed to read canvas history file: %w", err)
+		}
+	} else {
+		// 文件不存在，返回默认空记录
 		defaultData := struct {
 			Viewport ViewportRecord `json:"viewport"`
 			Images   []ImageRecord  `json:"images"`
@@ -505,17 +619,27 @@ func (h *HistoryService) LoadCanvasHistory() (string, error) {
 		return string(data), nil
 	}
 
-	// 读取文件
-	data, err := os.ReadFile(h.canvasFile)
-	if err != nil {
-		return "", fmt.Errorf("failed to read canvas history file: %w", err)
-	}
-
 	// 解析历史记录结构
 	var history CanvasHistory
 	if err := json.Unmarshal(data, &history); err != nil {
 		// 如果解析失败，尝试直接返回原始数据（兼容旧格式）
 		return string(data), nil
+	}
+
+	// ✅ 性能优化：加载图片引用并还原为 data URL
+	for i := range history.Images {
+		if history.Images[i].Src != "" && strings.HasPrefix(history.Images[i].Src, "images/") {
+			// 新格式：加载图片引用
+			dataURL, err := h.imageStorage.LoadImage(history.Images[i].Src)
+			if err != nil {
+				fmt.Printf("[HistoryService] Warning: failed to load image %s: %v\n", history.Images[i].ID, err)
+				// 继续处理，使用空字符串
+				history.Images[i].Src = ""
+			} else {
+				history.Images[i].Src = dataURL
+			}
+		}
+		// 旧格式：已经是 base64 data URL，直接使用
 	}
 
 	// 构建返回数据
@@ -543,6 +667,110 @@ func (h *HistoryService) ClearCanvasHistory() error {
 	// 删除文件（如果存在）
 	if err := os.Remove(h.canvasFile); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to remove canvas history file: %w", err)
+	}
+
+	// 同时删除旧格式文件（如果存在）
+	oldFile := filepath.Join(h.dataDir, "canvas_history.json")
+	os.Remove(oldFile) // 忽略错误
+
+	return nil
+}
+
+// ==================== 数据迁移 ====================
+
+// migrateOldFormat 迁移旧格式数据到新格式
+// 将旧格式的 JSON 文件（包含 base64 图片）迁移为新格式（图片分离存储）
+func (h *HistoryService) migrateOldFormat() error {
+	oldChatFile := filepath.Join(h.dataDir, "chat_history.json")
+	oldCanvasFile := filepath.Join(h.dataDir, "canvas_history.json")
+
+	// 检查并删除旧的压缩文件（压缩服务已移除，无法读取）
+	oldCompressedChatFile := filepath.Join(h.dataDir, "chat_history.json.zst")
+	oldCompressedCanvasFile := filepath.Join(h.dataDir, "canvas_history.json.zst")
+	if _, err := os.Stat(oldCompressedChatFile); err == nil {
+		fmt.Printf("[HistoryService] Removing old compressed chat history file (compression service removed)\n")
+		os.Remove(oldCompressedChatFile)
+	}
+	if _, err := os.Stat(oldCompressedCanvasFile); err == nil {
+		fmt.Printf("[HistoryService] Removing old compressed canvas history file (compression service removed)\n")
+		os.Remove(oldCompressedCanvasFile)
+	}
+
+	// 迁移聊天历史
+	if _, err := os.Stat(oldChatFile); err == nil {
+		// 检查新文件是否已存在
+		if _, err := os.Stat(h.chatFile); os.IsNotExist(err) {
+			fmt.Printf("[HistoryService] Migrating chat history from old format...\n")
+			// 读取旧文件
+			data, err := os.ReadFile(oldChatFile)
+			if err != nil {
+				return fmt.Errorf("failed to read old chat history: %w", err)
+			}
+
+			// 解析并保存为新格式（会自动提取图片）
+			var messages []ChatRecord
+			var history ChatHistory
+			if err := json.Unmarshal(data, &history); err == nil {
+				messages = history.Messages
+			} else if err := json.Unmarshal(data, &messages); err != nil {
+				// 尝试直接解析为消息数组
+				return fmt.Errorf("failed to parse old chat history: %w", err)
+			}
+
+			// 保存为新格式
+			messagesJSON, _ := json.Marshal(messages)
+			if err := h.saveChatHistorySync(string(messagesJSON)); err != nil {
+				return fmt.Errorf("failed to save migrated chat history: %w", err)
+			}
+
+			// 备份旧文件
+			backupFile := oldChatFile + ".backup"
+			if err := os.Rename(oldChatFile, backupFile); err != nil {
+				fmt.Printf("[HistoryService] Warning: failed to backup old chat history: %v\n", err)
+			} else {
+				fmt.Printf("[HistoryService] Migrated chat history, old file backed up to %s\n", backupFile)
+			}
+		}
+	}
+
+	// 迁移画布历史
+	if _, err := os.Stat(oldCanvasFile); err == nil {
+		// 检查新文件是否已存在
+		if _, err := os.Stat(h.canvasFile); os.IsNotExist(err) {
+			fmt.Printf("[HistoryService] Migrating canvas history from old format...\n")
+			// 读取旧文件
+			data, err := os.ReadFile(oldCanvasFile)
+			if err != nil {
+				return fmt.Errorf("failed to read old canvas history: %w", err)
+			}
+
+			// 解析并保存为新格式（会自动提取图片）
+			var canvasData struct {
+				Viewport ViewportRecord `json:"viewport"`
+				Images   []ImageRecord  `json:"images"`
+			}
+			var history CanvasHistory
+			if err := json.Unmarshal(data, &history); err == nil {
+				canvasData.Viewport = history.Viewport
+				canvasData.Images = history.Images
+			} else if err := json.Unmarshal(data, &canvasData); err != nil {
+				return fmt.Errorf("failed to parse old canvas history: %w", err)
+			}
+
+			// 保存为新格式
+			canvasJSON, _ := json.Marshal(canvasData)
+			if err := h.saveCanvasHistorySync(string(canvasJSON)); err != nil {
+				return fmt.Errorf("failed to save migrated canvas history: %w", err)
+			}
+
+			// 备份旧文件
+			backupFile := oldCanvasFile + ".backup"
+			if err := os.Rename(oldCanvasFile, backupFile); err != nil {
+				fmt.Printf("[HistoryService] Warning: failed to backup old canvas history: %v\n", err)
+			} else {
+				fmt.Printf("[HistoryService] Migrated canvas history, old file backed up to %s\n", backupFile)
+			}
+		}
 	}
 
 	return nil

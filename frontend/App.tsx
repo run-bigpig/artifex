@@ -5,9 +5,12 @@ import Sidebar from './components/Sidebar';
 import Header from './components/Header';
 import LoadingOverlay from './components/LoadingOverlay';
 import { generateImage, editMultiImages } from './services/aiService';
-import { loadCanvasHistory, saveCanvasHistory } from './services/historyService';
+import { loadCanvasHistory, saveCanvasHistory, flushCanvasHistory, saveCanvasHistorySync, saveChatHistorySync, flushChatHistory } from './services/historyService';
+import { ChatMessage } from './types';
 import { serializationWorker } from './services/serializationWorker';
 import { ImageIndex, hasImagesChanged } from './utils/imageIndex';
+import { activityDetector } from './services/activityDetector';
+import SaveProgressOverlay from './components/SaveProgressOverlay';
 
 const generateId = () => Math.random().toString(36).substr(2, 9);
 
@@ -26,15 +29,15 @@ const App: React.FC = () => {
   const [images, setImages] = useState<CanvasImage[]>([]);
   // Changed from single ID to array of IDs for multi-selection
   const [selectedImageIds, setSelectedImageIds] = useState<string[]>([]);
-  
+
   // Sidebar/Chat State Integration
   const [sidebarInputValue, setSidebarInputValue] = useState('');
-  
+
   // Attachments for Chat
   const [attachments, setAttachments] = useState<Attachment[]>([]);
-  
+
   const [isProcessing, setIsProcessing] = useState(false);
-  
+
   // Model Settings State
   const [modelSettings, setModelSettings] = useState<ModelSettings>({
     temperature: 1.0,
@@ -43,18 +46,36 @@ const App: React.FC = () => {
     aspectRatio: '1:1',
     imageSize: '1K'
   });
-  
+
   // Viewport State (Camera)
   const [viewport, setViewport] = useState<Viewport>({ x: 0, y: 0, zoom: 1 });
-  
+
   // 用于跟踪数据变化的 ref
   const isInitialLoadRef = useRef(true);
   const prevCanvasDataRef = useRef<{ viewport: Viewport; images: CanvasImage[] } | null>(null);
-  
+
   // ✅ 添加加载标志，防止重复加载
   const isLoadingCanvasHistoryRef = useRef(false);
   const hasLoadedCanvasHistoryRef = useRef(false);
-  
+
+  // ✅ 用于应用关闭时保存的 ref（避免每次变化时重新注册事件监听器）
+  const viewportRef = useRef<Viewport>(viewport);
+  const imagesRef = useRef<CanvasImage[]>(images);
+  const messagesRef = useRef<ChatMessage[] | null>(null);
+
+  // 同步更新 ref
+  useEffect(() => {
+    viewportRef.current = viewport;
+    imagesRef.current = images;
+  }, [viewport, images]);
+
+  // 保存进度状态
+  const [saveProgress, setSaveProgress] = useState({
+    isVisible: false,
+    chatSaved: false,
+    canvasSaved: false
+  });
+
   // ✅ 性能优化：使用索引来加速比较和查找
   // 使用 useMemo 缓存索引，只在 images 变化时重建
   const imageIndex = useMemo(() => new ImageIndex(images), [images]);
@@ -69,7 +90,7 @@ const App: React.FC = () => {
   // Helper to get canvas container dimensions
   const getCanvasDimensions = () => {
     // Sidebar is always 420px wide now
-    const sidebarWidth = 420; 
+    const sidebarWidth = 420;
     const canvasWidth = window.innerWidth - sidebarWidth;
     const canvasHeight = window.innerHeight;
     return { width: canvasWidth, height: canvasHeight };
@@ -81,7 +102,7 @@ const App: React.FC = () => {
 
     const centerX = (canvasWidth / 2 - viewport.x) / viewport.zoom;
     const centerY = (canvasHeight / 2 - viewport.y) / viewport.zoom;
-    
+
     return {
       x: centerX - (width / 2),
       y: centerY - (height / 2)
@@ -91,37 +112,37 @@ const App: React.FC = () => {
   // Helper to constrain image size to fit within canvas viewport
   // Returns constrained dimensions while maintaining aspect ratio
   const constrainImageSize = (
-    originalWidth: number, 
+    originalWidth: number,
     originalHeight: number,
     maxWidth?: number,
     maxHeight?: number
   ): { width: number; height: number } => {
     // Get canvas dimensions if not provided
     const { width: canvasWidth, height: canvasHeight } = getCanvasDimensions();
-    
+
     // Use provided max dimensions or calculate from canvas (with some padding)
     // 留出一些边距，确保图片不会紧贴边缘
     const padding = 40;
     const effectiveMaxWidth = maxWidth ?? (canvasWidth / viewport.zoom - padding);
     const effectiveMaxHeight = maxHeight ?? (canvasHeight / viewport.zoom - padding);
-    
+
     // Calculate aspect ratio
     const aspectRatio = originalWidth / originalHeight;
-    
+
     let finalWidth = originalWidth;
     let finalHeight = originalHeight;
-    
+
     // Scale down if image exceeds max dimensions
     if (finalWidth > effectiveMaxWidth || finalHeight > effectiveMaxHeight) {
       const widthRatio = effectiveMaxWidth / finalWidth;
       const heightRatio = effectiveMaxHeight / finalHeight;
       // Use the smaller ratio to ensure both dimensions fit
       const scaleRatio = Math.min(widthRatio, heightRatio);
-      
+
       finalWidth = originalWidth * scaleRatio;
       finalHeight = originalHeight * scaleRatio;
     }
-    
+
     return { width: finalWidth, height: finalHeight };
   };
 
@@ -131,20 +152,20 @@ const App: React.FC = () => {
 
     // Helper to setup edit mode
     const setupEdit = (promptText: string) => {
+      // 1. 首先清空参考图输入框的内容，然后添加新图片到参考图输入框
       const newAttachments: Attachment[] = [];
       affectedIds.forEach(affectedId => {
-         if (!attachments.some(a => a.type === 'canvas' && a.content === affectedId)) {
-           newAttachments.push({
-             id: generateId(),
-             type: 'canvas',
-             content: affectedId
-           });
-         }
+        newAttachments.push({
+          id: generateId(),
+          type: 'canvas',
+          content: affectedId
+        });
       });
+
+      // 一次性设置新的 attachments（清空旧内容并添加新内容）
+      setAttachments(newAttachments);
       
-      if (newAttachments.length > 0) {
-        setAttachments(prev => [...prev, ...newAttachments]);
-      }
+      // 2. 设置提示词
       if (promptText) {
         setSidebarInputValue(promptText);
       }
@@ -154,19 +175,19 @@ const App: React.FC = () => {
       case 'edit':
         setupEdit('');
         break;
-      
+
       case 'extract_subject':
         setupEdit('抠图：去除背景，只保留主体 (Remove background, keep subject only)');
         break;
-      
+
       case 'extract_mid':
         setupEdit('抠图：提取中景元素，去除前景和背景 (Extract midground elements)');
         break;
-      
+
       case 'extract_bg':
         setupEdit('抠图：去除主体，只保留背景 (Remove subject, keep background only)');
         break;
-      
+
       case 'enhance':
         setupEdit('变清晰');
         break;
@@ -192,29 +213,32 @@ const App: React.FC = () => {
 
   // 处理扩图生成完成
   const handleGenerateExpanded = (imageId: string, expandedBase64: string) => {
-    // 1. 将扩图后的图片添加到参考图列表
-    setAttachments(prev => [...prev, {
+    // 1. 首先清空参考图输入框的内容
+    setAttachments([]);
+    
+    // 2. 然后将扩图后的图片添加到参考图列表
+    setAttachments([{
       id: generateId(),
       type: 'local',
       content: expandedBase64
     }]);
-    
-    // 2. 自动在提示词输入框中写入"扩图"关键词
+
+    // 3. 自动在提示词输入框中写入"扩图"关键词
     setSidebarInputValue('扩图');
-    
-    // 3. 重置选中状态（恢复到初始状态）
+
+    // 4. 重置选中状态（恢复到初始状态）
     setSelectedImageIds([]);
   };
 
   const handleImportImage = async (base64: string, dropX?: number, dropY?: number) => {
     try {
       const { width, height } = await loadImageDimensions(base64);
-      
+
       // Constrain image size to fit within canvas viewport while maintaining aspect ratio
       const { width: finalWidth, height: finalHeight } = constrainImageSize(width, height);
 
       const newId = generateId();
-      
+
       let xPos, yPos;
 
       if (dropX !== undefined && dropY !== undefined) {
@@ -230,7 +254,7 @@ const App: React.FC = () => {
       const newImage: CanvasImage = {
         id: newId,
         src: base64,
-        x: xPos, 
+        x: xPos,
         y: yPos,
         width: finalWidth,
         height: finalHeight,
@@ -258,10 +282,10 @@ const App: React.FC = () => {
       };
       const base64 = await generateImage(prompt, settingsForGenerate);
       const { width, height } = await loadImageDimensions(base64);
-      
+
       // Constrain image size to fit within canvas viewport while maintaining aspect ratio
       const { width: finalWidth, height: finalHeight } = constrainImageSize(width, height);
-      
+
       const pos = getCanvasCenter(finalWidth, finalHeight);
 
       const newImage: CanvasImage = {
@@ -294,7 +318,7 @@ const App: React.FC = () => {
       // 使用统一的 editMultiImages 方法（支持单图和多图）
       // 如果 aspectRatio 或 imageSize 为空字符串，则不传递这些参数（保持原图）
       const newBase64 = await editMultiImages(
-        base64Sources, 
+        base64Sources,
         prompt,
         modelSettings.imageSize || undefined,
         modelSettings.aspectRatio || undefined
@@ -310,8 +334,8 @@ const App: React.FC = () => {
       const newImage: CanvasImage = {
         id: generateId(),
         src: newBase64,
-        width: finalWidth,   
-        height: finalHeight, 
+        width: finalWidth,
+        height: finalHeight,
         x: pos.x + 40,
         y: pos.y + 40,
         zIndex: images.length + 2,
@@ -338,29 +362,40 @@ const App: React.FC = () => {
     setLoadProgress(prev => ({ ...prev, chatLoaded: true }));
   }, []); // 空依赖数组，确保函数引用稳定
 
+  // ✅ 应用启动时初始化活动检测器（只执行一次）
+  useEffect(() => {
+    // 启动用户活动检测器，用于基于用户活动的防抖保存
+    activityDetector.start();
+
+    // 组件卸载时停止活动检测器
+    return () => {
+      activityDetector.stop();
+    };
+  }, []);
+
   // ✅ 应用启动时加载画布历史记录（只执行一次）
   useEffect(() => {
     // 防止重复加载
     if (hasLoadedCanvasHistoryRef.current || isLoadingCanvasHistoryRef.current) {
       return;
     }
-    
+
     isLoadingCanvasHistoryRef.current = true;
     hasLoadedCanvasHistoryRef.current = true;
-    
+
     const loadHistory = async () => {
       try {
         const { viewport: savedViewport, images: savedImages } = await loadCanvasHistory();
         const finalViewport = savedViewport || { x: 0, y: 0, zoom: 1 };
         const finalImages = savedImages || [];
-        
+
         if (finalImages.length > 0) {
           setImages(finalImages);
         }
         if (savedViewport) {
           setViewport(finalViewport);
         }
-        
+
         // 更新数据快照（在状态更新后）
         prevCanvasDataRef.current = {
           viewport: { ...finalViewport },
@@ -399,7 +434,7 @@ const App: React.FC = () => {
   // ✅ 性能优化：使用索引进行快速比较
   // 使用 ImageIndex 来加速比较，避免 O(n²) 的嵌套循环
   const prevImageIndexRef = useRef<ImageIndex | null>(null);
-  
+
   const hasCanvasDataChanged = (
     prev: { viewport: Viewport; images: CanvasImage[] } | null,
     current: { viewport: Viewport; images: CanvasImage[] }
@@ -407,7 +442,7 @@ const App: React.FC = () => {
     if (!prev) return true;
 
     // 快速比较 viewport
-    const viewportChanged = 
+    const viewportChanged =
       prev.viewport.x !== current.viewport.x ||
       prev.viewport.y !== current.viewport.y ||
       prev.viewport.zoom !== current.viewport.zoom;
@@ -415,21 +450,21 @@ const App: React.FC = () => {
     // ✅ 使用索引快速比较 images（O(n) 而不是 O(n²)）
     // 创建当前图片的索引
     const currentIndex = new ImageIndex(current.images);
-    
+
     // 如果之前的索引不存在，创建它
     if (!prevImageIndexRef.current) {
       prevImageIndexRef.current = new ImageIndex(prev.images);
     }
-    
+
     // 如果长度不同，直接返回 true
     if (prev.images.length !== current.images.length) {
       prevImageIndexRef.current = currentIndex;
       return true;
     }
-    
+
     // 使用索引比较
     const imagesChanged = prevImageIndexRef.current.hasChanged(currentIndex);
-    
+
     // 更新索引缓存
     if (imagesChanged) {
       prevImageIndexRef.current = currentIndex;
@@ -466,27 +501,107 @@ const App: React.FC = () => {
     };
   }, [viewport, images]);
 
-  // 清理 Worker（组件卸载时）
+  // ✅ 关闭应用前的保存处理函数
+  const handleClose = async (): Promise<void> => {
+    // 显示保存进度
+    setSaveProgress({
+      isVisible: true,
+      chatSaved: false,
+      canvasSaved: false
+    });
+
+    try {
+      // 并行保存聊天和画布历史
+      const savePromises: Promise<void>[] = [];
+      // 保存画布历史
+      savePromises.push(
+        saveCanvasHistorySync(viewportRef.current, imagesRef.current)
+          .then(() => {
+            setSaveProgress(prev => ({ ...prev, canvasSaved: true }));
+          })
+          .catch((error) => {
+            console.error('保存画布历史失败:', error);
+            setSaveProgress(prev => ({ ...prev, canvasSaved: true })); // 即使失败也标记为完成
+          })
+      );
+
+      // 保存聊天历史
+      if (messagesRef.current && messagesRef.current.length > 0) {
+        savePromises.push(
+          saveChatHistorySync(messagesRef.current)
+            .then(() => {
+              setSaveProgress(prev => ({ ...prev, chatSaved: true }));
+            })
+            .catch((error) => {
+              console.error('保存聊天历史失败:', error);
+              setSaveProgress(prev => ({ ...prev, chatSaved: true })); // 即使失败也标记为完成
+            })
+        );
+      } else {
+        // 没有消息，直接标记为完成
+        setSaveProgress(prev => ({ ...prev, chatSaved: true }));
+      }
+
+      // 等待所有保存完成
+      await Promise.all(savePromises);
+
+      // 短暂延迟，让用户看到完成状态
+      await new Promise(resolve => setTimeout(resolve, 500));
+    } catch (error) {
+      console.error('保存历史记录时出错:', error);
+      // 即使出错也继续关闭
+    }
+  };
+
+  // ✅ 应用关闭时保存画布历史记录（后备方案，用于异常退出）
   useEffect(() => {
+    const handleBeforeUnload = () => {
+      // 立即保存画布历史，取消待执行的防抖保存
+      flushCanvasHistory(viewportRef.current, imagesRef.current);
+      if (messagesRef.current) {
+        flushChatHistory(messagesRef.current);
+      }
+    };
+
+    // 监听页面卸载事件（应用关闭时）
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
+    // 组件卸载时也保存（作为后备方案）
     return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      // 组件卸载时立即保存
+      flushCanvasHistory(viewportRef.current, imagesRef.current);
+      if (messagesRef.current) {
+        flushChatHistory(messagesRef.current);
+      }
+      // 清理 Worker
       serializationWorker.terminate();
     };
-  }, []);
+  }, []); // 空依赖数组，只在组件挂载/卸载时执行
 
   return (
     <>
       {/* 全局加载蒙版 */}
       <LoadingOverlay isLoading={isLoading} progress={loadProgress} />
 
+      {/* 保存进度提示 */}
+      <SaveProgressOverlay
+        isVisible={saveProgress.isVisible}
+        progress={{
+          chatSaved: saveProgress.chatSaved,
+          canvasSaved: saveProgress.canvasSaved
+        }}
+      />
+
       <div className="flex flex-col h-screen w-screen bg-slate-950 overflow-hidden font-sans">
         {/* Header */}
-        <Header onOpenAppSettings={() => {}} />
-        
+        <Header onOpenAppSettings={() => { }} onClose={handleClose} />
+
         {/* Main Content Area */}
         <div className="flex flex-1 overflow-hidden pt-16">
           {/* Sidebar (Left) */}
           <div className="flex-shrink-0 h-full">
-            <Sidebar 
+            <Sidebar
               onGenerate={handleGenerate}
               onEdit={handleEdit}
               onAddToCanvas={handleAddToCanvas}
@@ -499,12 +614,13 @@ const App: React.FC = () => {
               modelSettings={modelSettings}
               setModelSettings={setModelSettings}
               onChatHistoryLoaded={handleChatHistoryLoaded}
+              messagesRef={messagesRef}
             />
           </div>
 
           {/* Main Workspace */}
           <div className="flex-1 relative h-full">
-            <Canvas 
+            <Canvas
               images={images}
               setImages={setImages}
               selectedImageIds={selectedImageIds}

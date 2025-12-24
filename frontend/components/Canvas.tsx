@@ -65,6 +65,9 @@ const Canvas: React.FC<CanvasProps> = ({
   // 使用 ref 跟踪 Alt 键状态，避免状态更新延迟问题
   const altKeyPressedRef = useRef(false);
   
+  // ✅ 性能优化：使用 ref 跟踪是否正在拖动，避免 zIndex 更新和拖动冲突
+  const isDraggingRef = useRef(false);
+  
   // Dropdown state for the active menu
   const [showExtractMenu, setShowExtractMenu] = useState(false);
 
@@ -73,41 +76,90 @@ const Canvas: React.FC<CanvasProps> = ({
     setShowExtractMenu(false);
   }, [selectedImageIds]);
 
+  // ✅ 性能优化：提取 zIndex 更新逻辑为独立函数，可在拖动时立即同步调用
+  const updateSelectedImagesZIndex = useCallback((targetSelectedIds: string[], sync: boolean = false) => {
+    if (targetSelectedIds.length === 0) return;
+
+    const updateZIndex = () => {
+      setImages(prev => {
+        // ✅ 性能优化：使用单次遍历计算最大 zIndex，避免展开运算符的性能问题
+        let maxZIndex = 0;
+        for (const img of prev) {
+          if (img.zIndex > maxZIndex) {
+            maxZIndex = img.zIndex;
+          }
+        }
+
+        // ✅ 性能优化：使用 Set 进行 O(1) 查找，而不是 O(n) 的 indexOf
+        const selectedSet = new Set(targetSelectedIds);
+        const selectedIndexMap = new Map<string, number>();
+        targetSelectedIds.forEach((id, index) => {
+          selectedIndexMap.set(id, index);
+        });
+
+        // ✅ 性能优化：单次遍历检查是否需要更新
+        let needsUpdate = false;
+        for (const img of prev) {
+          if (selectedSet.has(img.id)) {
+            const index = selectedIndexMap.get(img.id)!;
+            if (img.zIndex !== maxZIndex + index + 1) {
+              needsUpdate = true;
+              break;
+            }
+          }
+        }
+
+        // 如果没有需要更新的，直接返回原数组（避免不必要的状态更新）
+        if (!needsUpdate) return prev;
+
+        // ✅ 性能优化：单次遍历更新 zIndex
+        // 更新选中图片的 zIndex，使其在最上层
+        // 多个图片选中时，按选中顺序设置 zIndex，最后选中的在最上层
+        return prev.map(img => {
+          if (selectedSet.has(img.id)) {
+            const index = selectedIndexMap.get(img.id)!;
+            // 选中的图片：根据在选中数组中的位置设置 zIndex
+            // 最后选中的图片（数组最后一个）zIndex 最大
+            return {
+              ...img,
+              zIndex: maxZIndex + index + 1
+            };
+          }
+          return img;
+        });
+      });
+    };
+
+    if (sync) {
+      // 同步执行（拖动时立即更新，避免卡顿）
+      updateZIndex();
+    } else {
+      // 异步执行（非拖动时避免阻塞主进程）
+      requestAnimationFrame(updateZIndex);
+    }
+  }, []);
+
   // 当选中图片时，自动将选中的图片提升到最上层
+  // ✅ 性能优化：拖动时立即同步更新 zIndex，非拖动时异步更新避免阻塞
   useEffect(() => {
     if (selectedImageIds.length === 0) return;
 
-    setImages(prev => {
-      // 获取当前所有图片的最大 zIndex
-      const maxZIndex = prev.length > 0 
-        ? Math.max(...prev.map(img => img.zIndex), 0)
-        : 0;
+    // 如果正在拖动，立即同步更新（避免拖动卡顿）
+    if (isDraggingRef.current) {
+      updateSelectedImagesZIndex(selectedImageIds, true);
+      return;
+    }
 
-      // 检查是否有选中的图片需要更新 zIndex
-      const needsUpdate = prev.some(img => {
-        const index = selectedImageIds.indexOf(img.id);
-        return index !== -1 && img.zIndex !== maxZIndex + index + 1;
-      });
-
-      // 如果没有需要更新的，直接返回原数组（避免不必要的状态更新）
-      if (!needsUpdate) return prev;
-
-      // 更新选中图片的 zIndex，使其在最上层
-      // 多个图片选中时，按选中顺序设置 zIndex，最后选中的在最上层
-      return prev.map(img => {
-        const index = selectedImageIds.indexOf(img.id);
-        if (index !== -1) {
-          // 选中的图片：根据在选中数组中的位置设置 zIndex
-          // 最后选中的图片（数组最后一个）zIndex 最大
-          return {
-            ...img,
-            zIndex: maxZIndex + index + 1
-          };
-        }
-        return img;
-      });
+    // 否则使用 requestAnimationFrame 异步更新（避免阻塞主进程）
+    const rafId = requestAnimationFrame(() => {
+      updateSelectedImagesZIndex(selectedImageIds, true);
     });
-  }, [selectedImageIds]); // 只依赖 selectedImageIds，在 setImages 内部获取最新的 images 状态
+
+    // 清理函数：如果组件卸载或依赖变化，取消待执行的更新
+    return () => {
+      cancelAnimationFrame(rafId);
+    };
+  }, [selectedImageIds, updateSelectedImagesZIndex]); // 依赖 selectedImageIds 和 updateSelectedImagesZIndex
 
   // 扩图模式状态（需要在 useEffect 之前声明）
   const [expandingImageId, setExpandingImageId] = useState<string | null>(null);
@@ -167,78 +219,93 @@ const Canvas: React.FC<CanvasProps> = ({
   }, [imageIndex]);
 
   /**
-   * 从系统剪贴板粘贴图片
+   * 处理粘贴事件（使用 ClipboardEvent API，与输入框区域的处理方式完全一致）
+   * @param e 剪贴板事件
    */
-  const handlePasteFromClipboard = useCallback(async () => {
-    try {
-      // 读取剪贴板内容
-      const clipboardItems = await navigator.clipboard.read();
-      
-      // 查找图片类型的剪贴板项
-      for (const item of clipboardItems) {
-        // 检查是否有图片类型
-        const imageTypes = item.types.filter(type => type.startsWith('image/'));
-        
-        if (imageTypes.length > 0) {
-          // 获取第一个图片类型
-          const imageType = imageTypes[0];
-          const blob = await item.getType(imageType);
-          
-          // 将 Blob 转换为 base64
+  const handlePaste = useCallback((e: React.ClipboardEvent) => {
+    // 统一使用 ClipboardEvent API，与输入框区域的处理方式完全一致
+    const items = e.clipboardData.items;
+    
+    // 查找图片类型的剪贴板项（与 Sidebar 中的 handlePaste 逻辑完全一致）
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].type.indexOf('image') !== -1) {
+        e.preventDefault();
+        const file = items[i].getAsFile();
+        if (file) {
+          // 将 File 转换为 base64 并添加到画布
           const reader = new FileReader();
           reader.onload = (ev) => {
-            try {
-              const base64 = ev.target?.result as string;
-              if (base64) {
-                // 添加到画布中心位置
-                onImportImage(base64);
-              }
-            } catch (error) {
-              console.error('处理剪贴板图片失败:', error);
+            const base64 = ev.target?.result as string;
+            if (base64) {
+              onImportImage(base64);
             }
           };
-          reader.onerror = () => {
-            console.error('读取剪贴板图片失败');
-          };
-          reader.readAsDataURL(blob);
+          reader.readAsDataURL(file);
+        }
+        return;
+      }
+    }
+  }, [onImportImage]);
+
+  // 在 document 级别监听 paste 事件
+  // div 元素的 onPaste 事件可能不会触发，需要在 document 级别监听
+  useEffect(() => {
+    const handleDocumentPaste = (e: ClipboardEvent) => {
+      const activeElement = document.activeElement;
+      const container = containerRef.current;
+      
+      // 如果容器不存在，不处理
+      if (!container) return;
+      
+      // 如果焦点在输入框（textarea/input）中，不处理（由输入框自己处理）
+      // 但排除容器本身（容器有 tabIndex=0）
+      if (activeElement && 
+          activeElement !== container &&
+          (activeElement.tagName === 'TEXTAREA' || activeElement.tagName === 'INPUT')) {
+        return;
+      }
+      
+      // 检查焦点是否在画布容器内（包括容器本身或其子元素）
+      // 如果焦点不在画布内，不处理
+      if (activeElement !== container && !container.contains(activeElement)) {
+        return;
+      }
+      
+      // 检查剪贴板中是否有图片
+      const items = e.clipboardData?.items;
+      if (!items || items.length === 0) return;
+      
+      // 查找图片类型的剪贴板项（与 Sidebar 中的 handlePaste 逻辑完全一致）
+      for (let i = 0; i < items.length; i++) {
+        if (items[i].type.indexOf('image') !== -1) {
+          e.preventDefault();
+          e.stopPropagation();
           
-          // 只处理第一个图片
+          const file = items[i].getAsFile();
+          if (file) {
+            // 将 File 转换为 base64 并添加到画布
+            const reader = new FileReader();
+            reader.onload = (ev) => {
+              const base64 = ev.target?.result as string;
+              if (base64) {
+                onImportImage(base64);
+              }
+            };
+            reader.onerror = () => {
+              console.error('读取剪贴板图片失败');
+            };
+            reader.readAsDataURL(file);
+          }
           return;
         }
       }
-      
-      // 如果没有找到图片，尝试读取文本（可能是图片 URL）
-      const textTypes = clipboardItems.flatMap(item => 
-        item.types.filter(type => type === 'text/plain')
-      );
-      
-      if (textTypes.length > 0) {
-        const firstItem = clipboardItems.find(item => 
-          item.types.includes('text/plain')
-        );
-        if (firstItem) {
-          const text = await firstItem.getType('text/plain');
-          const textContent = await text.text();
-          
-          // 检查是否是图片 URL（data URL 或 http/https URL）
-          if (textContent.startsWith('data:image/') || 
-              textContent.match(/^https?:\/\/.+\.(jpg|jpeg|png|gif|webp|bmp)/i)) {
-            // 如果是 data URL，直接使用
-            if (textContent.startsWith('data:image/')) {
-              onImportImage(textContent);
-            } else {
-              // 如果是 http/https URL，需要先加载图片
-              // 注意：由于跨域限制，可能需要后端代理
-              console.warn('暂不支持从 URL 粘贴图片，请使用图片文件或截图');
-            }
-          }
-        }
-      }
-    } catch (error) {
-      // 剪贴板读取失败（可能是权限问题或剪贴板中没有图片）
-      // 静默失败，不显示错误提示
-      console.debug('无法从剪贴板读取图片:', error);
-    }
+    };
+
+    // 使用 capture 阶段确保能捕获事件
+    document.addEventListener('paste', handleDocumentPaste, true);
+    return () => {
+      document.removeEventListener('paste', handleDocumentPaste, true);
+    };
   }, [onImportImage]);
 
   // --- Keyboard Shortcuts ---
@@ -265,10 +332,10 @@ const Canvas: React.FC<CanvasProps> = ({
 
     // Paste (Ctrl+V)
     if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
-      e.preventDefault();
-      
       // 1. 优先处理内部剪贴板（画布内复制的图片）
       if (internalClipboard.length > 0) {
+        e.preventDefault();
+        
         const newImages = internalClipboard.map(img => ({
           ...img,
           id: generateId(),
@@ -282,10 +349,37 @@ const Canvas: React.FC<CanvasProps> = ({
 
         setImages(prev => [...prev, ...newImages]);
         setSelectedImageIds(newImages.map(img => img.id));
-      } else {
-        // 2. 如果没有内部剪贴板，尝试从系统剪贴板读取图片
-        handlePasteFromClipboard();
+        return;
       }
+      
+      // 2. 如果没有内部剪贴板，尝试读取系统剪贴板
+      // 注意：这需要用户授权，如果失败则让 document 级别的监听器处理
+      if (navigator.clipboard && navigator.clipboard.read) {
+        e.preventDefault();
+        navigator.clipboard.read().then((clipboardItems) => {
+          for (const item of clipboardItems) {
+            for (const type of item.types) {
+              if (type.startsWith('image/')) {
+                item.getType(type).then((blob) => {
+                  const reader = new FileReader();
+                  reader.onload = (ev) => {
+                    const base64 = ev.target?.result as string;
+                    if (base64) {
+                      onImportImage(base64);
+                    }
+                  };
+                  reader.readAsDataURL(blob);
+                });
+                return;
+              }
+            }
+          }
+        }).catch((err) => {
+          // 如果读取失败（例如权限被拒绝），让 document 级别的监听器处理
+          console.warn('读取系统剪贴板失败，尝试使用 paste 事件:', err);
+        });
+      }
+      // 如果没有 Clipboard API，让 document 级别的监听器处理
     }
 
     // Duplicate (Ctrl+D)
@@ -318,7 +412,7 @@ const Canvas: React.FC<CanvasProps> = ({
       // ✅ 使用索引获取所有 id，已按 zIndex 排序
       setSelectedImageIds(imageIndex.getAllIds());
     }
-  }, [selectedImageIds, internalClipboard, images, imageIndex, handleCopyImages, handlePasteFromClipboard, setImages, setSelectedImageIds]);
+  }, [selectedImageIds, internalClipboard, images, imageIndex, handleCopyImages, setImages, setSelectedImageIds]);
 
   // --- Wheel Zoom ---
   /**
@@ -394,7 +488,7 @@ const Canvas: React.FC<CanvasProps> = ({
   // --- Mouse Interactions ---
 
   const handleMouseDown = (e: React.MouseEvent, imageId?: string) => {
-    // Explicitly focus container to ensure keyboard shortcuts work
+    // Explicitly focus container to ensure keyboard shortcuts and paste events work
     containerRef.current?.focus();
 
     // 2. Image Click
@@ -428,22 +522,34 @@ const Canvas: React.FC<CanvasProps> = ({
       setIsDragOutMode(false);
       altKeyPressedRef.current = false;
       
+      // ✅ 性能优化：在设置选中状态之前就设置拖动标志，并立即同步更新 zIndex
+      // 这样当选中状态变化时，zIndex 会立即同步更新，避免拖动时的卡顿
+      isDraggingRef.current = true;
+      
+      let newSelectedIds: string[];
       if (e.shiftKey || e.ctrlKey || e.metaKey) {
         // Toggle selection
         if (isSelected) {
-          setSelectedImageIds(selectedImageIds.filter(id => id !== imageId));
+          newSelectedIds = selectedImageIds.filter(id => id !== imageId);
         } else {
-          setSelectedImageIds([...selectedImageIds, imageId]);
+          newSelectedIds = [...selectedImageIds, imageId];
         }
       } else {
         // If not holding modifier...
         if (!isSelected) {
           // If clicking an unselected item, select ONLY it
-          setSelectedImageIds([imageId]);
+          newSelectedIds = [imageId];
+        } else {
+          // If clicking an already selected item, keep selection as is (allows dragging group)
+          newSelectedIds = selectedImageIds;
         }
-        // If clicking an already selected item, keep selection as is (allows dragging group)
       }
 
+      // ✅ 性能优化：立即同步更新 zIndex，确保拖动开始时 zIndex 已经更新完成
+      // 这样拖动操作可以立即开始，不会因为 zIndex 更新延迟而导致卡顿
+      updateSelectedImagesZIndex(newSelectedIds, true);
+      
+      setSelectedImageIds(newSelectedIds);
       setIsDraggingImage(true);
       setDragStart({ x: e.clientX, y: e.clientY });
     } 
@@ -553,11 +659,17 @@ const Canvas: React.FC<CanvasProps> = ({
       const dx = (e.clientX - dragStart.x) / scale;
       const dy = (e.clientY - dragStart.y) / scale;
       
-      setImages(prev => prev.map(img => 
-        selectedImageIds.includes(img.id)
-          ? { ...img, x: img.x + dx, y: img.y + dy } 
-          : img
-      ));
+      // ✅ 性能优化：在函数式更新中直接使用最新的 selectedImageIds 创建 Set
+      // 这样可以确保即使选中状态在拖动过程中变化，也能使用最新的状态
+      setImages(prev => {
+        // 在函数式更新中创建 Set，确保使用最新的选中状态
+        const selectedSet = new Set(selectedImageIds);
+        return prev.map(img => 
+          selectedSet.has(img.id)
+            ? { ...img, x: img.x + dx, y: img.y + dy } 
+            : img
+        );
+      });
       setDragStart({ x: e.clientX, y: e.clientY });
 
     } else if (isDraggingCanvas) {
@@ -575,6 +687,8 @@ const Canvas: React.FC<CanvasProps> = ({
    * 重置所有拖拽和调整大小状态
    */
   const handleMouseUp = useCallback(() => {
+    // ✅ 性能优化：重置拖动标志，恢复异步 zIndex 更新
+    isDraggingRef.current = false;
     setIsDraggingCanvas(false);
     setIsDraggingImage(false);
     setIsResizing(false);
@@ -1279,9 +1393,15 @@ const Canvas: React.FC<CanvasProps> = ({
               <div 
                 className="absolute flex gap-1 bg-slate-800/90 backdrop-blur rounded-lg p-1.5 shadow-xl border border-slate-700 pointer-events-auto z-50 items-center"
                 style={{
-                  left: screenX + screenWidth / 2,
-                  top: screenY - 48,
-                  transform: 'translate(-50%, 0)',
+                  // 扩图模式下，按钮显示在扩展后区域的水平中心
+                  left: isExpanding
+                    ? screenX + screenWidth / 2 + (expandOffsets.right - expandOffsets.left) * viewport.zoom / 2
+                    : screenX + screenWidth / 2,
+                  // 扩图模式下，按钮显示在扩展后区域的垂直中心
+                  top: isExpanding
+                    ? screenY + screenHeight / 2 + (expandOffsets.bottom - expandOffsets.top) * viewport.zoom / 2
+                    : screenY - 48,
+                  transform: 'translate(-50%, -50%)',
                 }}
                 onMouseDown={(e) => e.stopPropagation()} 
               >

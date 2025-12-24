@@ -4,23 +4,57 @@
  * 
  * @param func 要防抖的函数
  * @param wait 延迟时间（毫秒）
- * @returns 防抖后的函数
+ * @returns 防抖后的函数，包含 cancel 和 flush 方法
  */
+export interface DebouncedFunction<T extends (...args: any[]) => any> {
+  (...args: Parameters<T>): void;
+  cancel: () => void;
+  flush: () => void;
+}
+
 export function debounce<T extends (...args: any[]) => any>(
   func: T,
   wait: number
-): (...args: Parameters<T>) => void {
+): DebouncedFunction<T> {
   let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  let lastArgs: Parameters<T> | null = null;
 
-  return function debounced(...args: Parameters<T>) {
+  const debounced = function debounced(...args: Parameters<T>) {
+    lastArgs = args;
     if (timeoutId !== null) {
       clearTimeout(timeoutId);
     }
     timeoutId = setTimeout(() => {
-      func(...args);
+      if (lastArgs !== null) {
+        func(...lastArgs);
+        lastArgs = null;
+      }
       timeoutId = null;
     }, wait);
+  } as DebouncedFunction<T>;
+
+  // 取消待执行的函数
+  debounced.cancel = () => {
+    if (timeoutId !== null) {
+      clearTimeout(timeoutId);
+      timeoutId = null;
+    }
+    lastArgs = null;
   };
+
+  // 立即执行待执行的函数
+  debounced.flush = () => {
+    if (timeoutId !== null) {
+      clearTimeout(timeoutId);
+      timeoutId = null;
+    }
+    if (lastArgs !== null) {
+      func(...lastArgs);
+      lastArgs = null;
+    }
+  };
+
+  return debounced;
 }
 
 /**

@@ -72,21 +72,21 @@ const LoadingOverlay: React.FC<LoadingOverlayProps> = ({ isLoading, progress }) 
           <div className="flex justify-between text-sm">
             <span 
               className={`transition-all duration-300 ${
-                progress?.chatLoaded 
-                  ? 'text-green-400 font-medium scale-105' 
-                  : 'text-slate-400'
-              }`}
-            >
-              {progress?.chatLoaded ? '✓' : '○'} 对话历史
-            </span>
-            <span 
-              className={`transition-all duration-300 ${
                 progress?.canvasLoaded 
                   ? 'text-green-400 font-medium scale-105' 
                   : 'text-slate-400'
               }`}
             >
               {progress?.canvasLoaded ? '✓' : '○'} 画布历史
+            </span>
+            <span 
+              className={`transition-all duration-300 ${
+                progress?.chatLoaded 
+                  ? 'text-green-400 font-medium scale-105' 
+                  : 'text-slate-400'
+              }`}
+            >
+              {progress?.chatLoaded ? '✓' : '○'} 对话历史
             </span>
           </div>
         </div>

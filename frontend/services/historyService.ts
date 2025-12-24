@@ -12,13 +12,15 @@ import {
   LoadChatHistory, 
   ClearChatHistory,
   LoadCanvasHistory, 
-  ClearCanvasHistory 
+  ClearCanvasHistory,
+  SaveChatHistorySync,
+  SaveCanvasHistorySync
 } from '../wailsjs/go/core/App';
 import { EventsEmit } from '../wailsjs/runtime/runtime';
 import { ChatMessage } from '../types';
 import { CanvasImage, Viewport } from '../types';
 import { serializationWorker } from './serializationWorker';
-import { debounce } from '../utils/debounce';
+import { activityDebounce } from '../utils/activityDebounce';
 
 /**
  * 加载聊天历史记录
@@ -79,11 +81,11 @@ const _saveChatHistoryInternal = (messages: ChatMessage[]): void => {
  * @param messages 聊天消息数组
  * 
  * 性能优化：
- * - 使用防抖机制，延迟 300ms 执行，减少频繁保存
+ * - 使用基于用户活动的防抖机制，在用户停止操作 2 秒后保存
  * - 使用 Web Worker 进行 JSON 序列化，避免阻塞主线程
  * - 通过 EventsEmit 发送保存请求事件，立即返回，不等待保存完成
  */
-export const saveChatHistory = debounce(_saveChatHistoryInternal, 300);
+export const saveChatHistory = activityDebounce(_saveChatHistoryInternal, 10000);
 
 /**
  * 清除聊天历史记录
@@ -157,7 +159,7 @@ const _saveCanvasHistoryInternal = (viewport: Viewport, images: CanvasImage[]): 
           console.warn(`[HistoryService] 主线程序列化耗时较长: ${fallbackTime.toFixed(2)}ms`);
         }
         
-        EventsEmit('history:save-canvas', historyJSON);
+       EventsEmit('history:save-canvas', historyJSON);
       } catch (fallbackError) {
         console.error('Failed to save canvas history:', fallbackError);
       }
@@ -170,11 +172,111 @@ const _saveCanvasHistoryInternal = (viewport: Viewport, images: CanvasImage[]): 
  * @param images 画布图像数组
  * 
  * 性能优化：
- * - 使用防抖机制，延迟 500ms 执行，减少频繁保存
+ * - 使用基于用户活动的防抖机制，在用户停止操作 2.5 秒后保存
  * - 使用 Web Worker 进行 JSON 序列化，避免阻塞主线程
  * - 通过 EventsEmit 发送保存请求事件，立即返回，不等待保存完成
  */
-export const saveCanvasHistory = debounce(_saveCanvasHistoryInternal, 500);
+export const saveCanvasHistory = activityDebounce(_saveCanvasHistoryInternal, 10000);
+
+/**
+ * 立即保存聊天历史记录（用于应用关闭时）
+ * 会取消待执行的防抖保存，并立即执行保存
+ * @param messages 聊天消息数组
+ */
+export const flushChatHistory = (messages: ChatMessage[]): void => {
+  saveChatHistory.cancel();
+  _saveChatHistoryInternal(messages);
+};
+
+/**
+ * 立即保存画布历史记录（用于应用关闭时）
+ * 会取消待执行的防抖保存，并立即执行保存
+ * @param viewport 视口状态
+ * @param images 画布图像数组
+ */
+export const flushCanvasHistory = (viewport: Viewport, images: CanvasImage[]): void => {
+  saveCanvasHistory.cancel();
+  _saveCanvasHistoryInternal(viewport, images);
+};
+
+/**
+ * 同步保存聊天历史记录（等待保存完成）
+ * 用于应用关闭时确保数据已保存
+ * 直接调用 Go 后端的同步保存方法，不走事件队列
+ * @param messages 聊天消息数组
+ * @returns Promise，保存完成后 resolve
+ */
+export const saveChatHistorySync = async (messages: ChatMessage[]): Promise<void> => {
+  try {
+    const startTime = performance.now();
+    
+    // 使用 Web Worker 异步序列化
+    const historyJSON = await serializationWorker.stringify(messages);
+    const serializeTime = performance.now() - startTime;
+    
+    if (serializeTime > 100) {
+      console.warn(`[HistoryService] 聊天序列化耗时较长: ${serializeTime.toFixed(2)}ms`);
+    }
+    
+    // 直接调用 Go 后端的同步保存方法，确保数据已写入磁盘
+    await SaveChatHistorySync(historyJSON);
+    
+    const totalTime = performance.now() - startTime;
+    if (totalTime > 200) {
+      console.warn(`[HistoryService] 聊天历史同步保存总耗时: ${totalTime.toFixed(2)}ms`);
+    }
+  } catch (error) {
+    // 后备方案：使用主线程序列化
+    try {
+      const historyJSON = JSON.stringify(messages);
+      await SaveChatHistorySync(historyJSON);
+    } catch (fallbackError) {
+      console.error('Failed to save chat history:', fallbackError);
+      throw fallbackError;
+    }
+  }
+};
+
+/**
+ * 同步保存画布历史记录（等待保存完成）
+ * 用于应用关闭时确保数据已保存
+ * 直接调用 Go 后端的同步保存方法，不走事件队列
+ * @param viewport 视口状态
+ * @param images 画布图像数组
+ * @returns Promise，保存完成后 resolve
+ */
+export const saveCanvasHistorySync = async (viewport: Viewport, images: CanvasImage[]): Promise<void> => {
+  const data = { viewport, images };
+  
+  try {
+    const startTime = performance.now();
+    
+    // 使用 Web Worker 异步序列化
+    const historyJSON = await serializationWorker.stringify(data);
+    const serializeTime = performance.now() - startTime;
+    
+    if (serializeTime > 100) {
+      console.warn(`[HistoryService] 画布序列化耗时较长: ${serializeTime.toFixed(2)}ms`);
+    }
+    
+    // 直接调用 Go 后端的同步保存方法，确保数据已写入磁盘
+    await SaveCanvasHistorySync(historyJSON);
+    
+    const totalTime = performance.now() - startTime;
+    if (totalTime > 200) {
+      console.warn(`[HistoryService] 画布历史同步保存总耗时: ${totalTime.toFixed(2)}ms`);
+    }
+  } catch (error) {
+    // 后备方案：使用主线程序列化
+    try {
+      const historyJSON = JSON.stringify(data);
+      await SaveCanvasHistorySync(historyJSON);
+    } catch (fallbackError) {
+      console.error('Failed to save canvas history:', fallbackError);
+      throw fallbackError;
+    }
+  }
+};
 
 /**
  * 清除画布历史记录

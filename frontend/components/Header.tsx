@@ -5,11 +5,13 @@ import SettingsComponent from './Settings';
 
 interface HeaderProps {
   onOpenAppSettings?: () => void;
+  onClose?: () => Promise<void>;
 }
 
-const Header: React.FC<HeaderProps> = ({ onOpenAppSettings }) => {
+const Header: React.FC<HeaderProps> = ({ onOpenAppSettings, onClose }) => {
   const [showAppSettings, setShowAppSettings] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [isClosing, setIsClosing] = useState(false);
 
   // 检查全屏状态
   useEffect(() => {
@@ -40,8 +42,26 @@ const Header: React.FC<HeaderProps> = ({ onOpenAppSettings }) => {
     }, 100);
   };
 
-  const handleClose = () => {
-    Quit();
+  const handleClose = async () => {
+    if (isClosing) return; // 防止重复点击
+    
+    setIsClosing(true);
+    
+    try {
+      // 如果有自定义关闭处理函数，先执行它（保存数据）
+      if (onClose) {
+        await onClose();
+      }
+      
+      // 保存完成后关闭应用
+      Quit();
+    } catch (error) {
+      console.error('关闭应用时出错:', error);
+      // 即使保存失败，也关闭应用
+      Quit();
+    } finally {
+      setIsClosing(false);
+    }
   };
 
   const handleSettings = () => {

@@ -8,7 +8,7 @@ import {
   generateImageCancellable,
   editMultiImagesCancellable
 } from '../services/aiService';
-import { loadChatHistory, saveChatHistory, clearChatHistory } from '../services/historyService';
+import { loadChatHistory, saveChatHistory, clearChatHistory, flushChatHistory } from '../services/historyService';
 import ConfirmDialog from './ConfirmDialog';
 
 interface SidebarProps {
@@ -38,6 +38,9 @@ interface SidebarProps {
 
   // Loading callback
   onChatHistoryLoaded?: () => void;
+  
+  // 用于获取当前消息的 ref（用于关闭时保存）
+  messagesRef?: React.MutableRefObject<ChatMessage[] | null>;
 }
 
 const Sidebar: React.FC<SidebarProps> = ({
@@ -52,10 +55,12 @@ const Sidebar: React.FC<SidebarProps> = ({
   images,
   modelSettings,
   setModelSettings,
-  onChatHistoryLoaded
+  onChatHistoryLoaded,
+  messagesRef
 }) => {
   // Chat State
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  
   const [isDragging, setIsDragging] = useState(false);
   const [isEnhancing, setIsEnhancing] = useState(false);
   const [showResPicker, setShowResPicker] = useState(false);
@@ -235,6 +240,41 @@ const Sidebar: React.FC<SidebarProps> = ({
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  // ✅ 应用关闭时保存聊天历史记录（后备方案，用于异常退出）
+  // 使用传入的 messagesRef 或创建本地 ref
+  const localMessagesRef = useRef<ChatMessage[]>(messages);
+  const activeMessagesRef = messagesRef || localMessagesRef;
+  
+  useEffect(() => {
+    localMessagesRef.current = messages;
+    if (messagesRef) {
+      messagesRef.current = messages;
+    }
+  }, [messages, messagesRef]);
+
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      // 立即保存聊天历史，取消待执行的防抖保存
+      const currentMessages = activeMessagesRef.current;
+      if (currentMessages) {
+        flushChatHistory(currentMessages);
+      }
+    };
+
+    // 监听页面卸载事件（应用关闭时）
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
+    // 组件卸载时也保存（作为后备方案）
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      // 组件卸载时立即保存
+      const currentMessages = activeMessagesRef.current;
+      if (currentMessages) {
+        flushChatHistory(currentMessages);
+      }
+    };
+  }, [activeMessagesRef]); // 依赖 activeMessagesRef
 
   // Focus textarea when attached image changes (user clicked action)
   useEffect(() => {

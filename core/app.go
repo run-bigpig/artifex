@@ -192,6 +192,22 @@ func (a *App) ClearCanvasHistory() error {
 	return a.historyService.ClearCanvasHistory()
 }
 
+// SaveChatHistorySync 同步保存聊天历史记录（用于应用关闭时）
+// 直接保存，不走事件队列，确保数据已写入磁盘
+// @param chatHistoryJSON JSON 格式的聊天记录数组
+// @return error 保存失败时返回错误
+func (a *App) SaveChatHistorySync(chatHistoryJSON string) error {
+	return a.historyService.SaveChatHistorySync(chatHistoryJSON)
+}
+
+// SaveCanvasHistorySync 同步保存画布历史记录（用于应用关闭时）
+// 直接保存，不走事件队列，确保数据已写入磁盘
+// @param canvasHistoryJSON JSON 格式的画布记录，包含 viewport 和 images
+// @return error 保存失败时返回错误
+func (a *App) SaveCanvasHistorySync(canvasHistoryJSON string) error {
+	return a.historyService.SaveCanvasHistorySync(canvasHistoryJSON)
+}
+
 // Update 执行程序内更新（下载并替换当前可执行文件）
 // 返回错误信息字符串，如果成功则返回空字符串
 func (a *App) Update() (string, error) {
