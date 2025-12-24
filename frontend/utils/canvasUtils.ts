@@ -146,9 +146,24 @@ export const createDragPreviewThumbnailSync = (
 };
 
 /**
+ * 获取图片的原始尺寸（naturalWidth/naturalHeight）
+ * @param imgSrc 图片源（base64 或 URL）
+ * @returns Promise<{ width: number; height: number }> 原始尺寸
+ * @throws 如果图片加载失败
+ */
+export const getImageNaturalDimensions = (imgSrc: string): Promise<{ width: number; height: number }> => {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });
+    img.onerror = () => reject(new Error('图片加载失败'));
+    img.src = imgSrc;
+  });
+};
+
+/**
  * 生成带白边画布的扩展图片
  * @param imgSrc 原始图片源（base64）
- * @param offsets 扩展偏移量
+ * @param offsets 扩展偏移量（基于原始尺寸的像素值）
  * @returns Promise<string> 扩展后的 base64 图片
  * @throws 如果图片加载失败或 Canvas 操作失败
  */
@@ -161,7 +176,7 @@ export const generateExpandedImage = async (
     
     imageElement.onload = () => {
       try {
-        // 计算新画布的尺寸
+        // 计算新画布的尺寸（使用原始尺寸）
         const newWidth = imageElement.naturalWidth + offsets.left + offsets.right;
         const newHeight = imageElement.naturalHeight + offsets.top + offsets.bottom;
 

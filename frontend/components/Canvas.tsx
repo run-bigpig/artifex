@@ -8,6 +8,7 @@ import {
   getPngBlob,
   createDragPreviewThumbnailSync,
   generateExpandedImage,
+  getImageNaturalDimensions,
   calculateZoomViewport,
   clamp,
 } from '../utils/canvasUtils';
@@ -834,9 +835,43 @@ const Canvas: React.FC<CanvasProps> = ({
 
   // 生成带白边画布的图片（使用工具函数）
   // 注意：这里保留一个包装函数以保持接口一致性
+  /**
+   * 生成扩图：将显示尺寸的偏移量转换为原始尺寸的偏移量
+   * 
+   * 坐标系统说明：
+   * - img.width/height 是画布世界坐标系中的逻辑尺寸（不受 viewport.zoom 影响）
+   * - expandOffsets 也是世界坐标系中的偏移量（在拖动时已通过 / viewport.zoom 转换）
+   * - naturalWidth/Height 是原始图片的物理像素尺寸
+   * 
+   * 因此，我们需要将世界坐标中的偏移量转换为原始图片像素坐标中的偏移量
+   * 
+   * @param img 画布图片对象（包含世界坐标中的显示尺寸）
+   * @param offsets 基于世界坐标的扩展偏移量（已考虑 viewport.zoom）
+   * @returns Promise<string> 扩展后的 base64 图片
+   */
   const generateExpandedImageLocal = useCallback(async (img: CanvasImage, offsets: ExpandOffsets): Promise<string> => {
     try {
-      return await generateExpandedImage(img.src, offsets);
+      // 获取图片的原始尺寸（物理像素）
+      const naturalDims = await getImageNaturalDimensions(img.src);
+      
+      // 计算世界坐标显示尺寸与原始物理尺寸的比例
+      // img.width/height 是世界坐标（逻辑尺寸），不受 viewport.zoom 影响
+      // naturalDims 是原始图片的物理像素尺寸
+      const scaleX = naturalDims.width / img.width;
+      const scaleY = naturalDims.height / img.height;
+      
+      // 将偏移量从世界坐标转换为原始图片像素坐标
+      // offsets 已经是世界坐标（在拖动时已除以 viewport.zoom）
+      // 现在需要转换为原始图片的像素坐标
+      const naturalOffsets: ExpandOffsets = {
+        top: Math.round(offsets.top * scaleY),
+        right: Math.round(offsets.right * scaleX),
+        bottom: Math.round(offsets.bottom * scaleY),
+        left: Math.round(offsets.left * scaleX),
+      };
+      
+      // 使用转换后的偏移量生成扩图（基于原始像素尺寸）
+      return await generateExpandedImage(img.src, naturalOffsets);
     } catch (error) {
       console.error('生成扩展图片失败:', error);
       throw error;
