@@ -176,8 +176,7 @@ const Canvas: React.FC<CanvasProps> = ({
   
   // 跟踪上一次的 selectedImageId，用于检测新选中的图片
   const prevSelectedImageIdRef = useRef<string | null>(null);
-  
-  // 当 selectedImageId 变化且图片存在时，自动触发选中效果（模拟点击）
+  // Auto-focus canvas on selection change so Ctrl+C works.
   useEffect(() => {
     if (!selectedImageId) {
       prevSelectedImageIdRef.current = null;
@@ -195,48 +194,16 @@ const Canvas: React.FC<CanvasProps> = ({
     const isNewSelection = prevSelectedImageIdRef.current !== selectedImageId;
     
     if (isNewSelection) {
-      // 使用 requestAnimationFrame 确保 DOM 已经更新
+      // Use requestAnimationFrame to wait for DOM updates.
       requestAnimationFrame(() => {
         const imageElement = imageRefs.current.get(selectedImageId);
         if (imageElement) {
-          // 确保容器获得焦点，这样键盘快捷键才能工作
+          // Focus the container so keyboard shortcuts work.
           containerRef.current?.focus();
-          
-          // 使用 setTimeout 确保在下一帧执行，让状态更新完成
-          setTimeout(() => {
-            // 创建一个合成鼠标事件，模拟点击但不触发拖动
-            const mouseDownEvent = new MouseEvent('mousedown', {
-              bubbles: true,
-              cancelable: true,
-              view: window,
-              button: 0,
-              buttons: 0, // 设置为 0 表示没有按下任何按钮，这样不会触发拖动
-              clientX: 0,
-              clientY: 0,
-            });
-            
-            // 触发 mousedown 事件
-            imageElement.dispatchEvent(mouseDownEvent);
-            
-            // 立即触发 mouseup 事件，确保鼠标状态被释放
-            // 使用更短的延迟确保在用户可能拖动之前完成
-            setTimeout(() => {
-              const mouseUpEvent = new MouseEvent('mouseup', {
-                bubbles: true,
-                cancelable: true,
-                view: window,
-                button: 0,
-                buttons: 0,
-                clientX: 0,
-                clientY: 0,
-              });
-              imageElement.dispatchEvent(mouseUpEvent);
-            }, 0);
-          }, 10);
         }
       });
     }
-    
+
     prevSelectedImageIdRef.current = selectedImageId;
   }, [selectedImageId, images]);
   
