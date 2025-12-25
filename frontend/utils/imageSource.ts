@@ -8,6 +8,33 @@ export const isDataUrl = (src: string): boolean => src.startsWith("data:");
 export const isImageRef = (src: string): boolean =>
   src.startsWith(imageRefPrefix) || src.startsWith(imageRefPrefixAbs);
 
+export const toImageRef = (src: string): string => {
+  if (!src || isDataUrl(src)) {
+    return src;
+  }
+  if (src.startsWith(imageRefPrefix)) {
+    return src;
+  }
+  if (src.startsWith(imageRefPrefixAbs)) {
+    return src.slice(1);
+  }
+  if (normalizedAssetBase && src.startsWith(normalizedAssetBase)) {
+    const remainder = src.slice(normalizedAssetBase.length);
+    if (remainder.startsWith(imageRefPrefixAbs)) {
+      return remainder.slice(1);
+    }
+  }
+  try {
+    const parsed = new URL(src);
+    if (parsed.pathname.startsWith(imageRefPrefixAbs)) {
+      return parsed.pathname.slice(1);
+    }
+  } catch {
+    // Ignore URL parse errors and return the original source.
+  }
+  return src;
+};
+
 export const normalizeImageSrc = (src: string): string => {
   if (src.startsWith(imageRefPrefix)) {
     if (normalizedAssetBase) {

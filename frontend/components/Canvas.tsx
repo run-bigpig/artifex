@@ -27,8 +27,8 @@ interface CanvasProps {
   viewport: Viewport;
   setViewport: React.Dispatch<React.SetStateAction<Viewport>>;
   onAction: (id: string, action: CanvasActionType) => void;
-  onImportImage: (base64: string, x: number, y: number) => void;
-  onGenerateExpanded?: (imageId: string, expandedBase64: string) => void;
+  onImportImage: (imageSrc: string, x?: number, y?: number) => void;
+  onGenerateExpanded?: (imageId: string, expandedImageDataUrl: string) => void;
 }
 
 type ResizeHandle = 'tl' | 'tr' | 'bl' | 'br';
@@ -708,11 +708,11 @@ const Canvas: React.FC<CanvasProps> = ({
       if (existingImg && existingImg.naturalWidth > 0) {
         sourceImg = existingImg;
       } else {
-        // 方法2：创建新的图片元素（使用 base64 src）
+        // 方法2：创建新的图片元素（使用可加载的 src）
         const tempImg = new Image();
-        tempImg.src = img.src;
+        tempImg.src = normalizeImageSrc(img.src);
         
-        // 对于 base64 图片，如果已经在缓存中，complete 会立即为 true
+        // 对于已缓存图片，complete 会立即为 true
         if (tempImg.complete && tempImg.naturalWidth > 0) {
           sourceImg = tempImg;
         }
@@ -783,7 +783,7 @@ const Canvas: React.FC<CanvasProps> = ({
     }
     
     // 将图片数据存储到 dataTransfer
-    const dragSrc = normalizeImageSrc(img.src);
+    const dragSrc = img.src;
     e.dataTransfer.setData('application/canvas-image', img.id);
     if (isDataUrl(dragSrc) || isImageRef(dragSrc)) {
       e.dataTransfer.setData('text/plain', dragSrc);
@@ -1306,9 +1306,9 @@ const Canvas: React.FC<CanvasProps> = ({
     // 检查是否是从画布拖拽的图片（Alt键拖拽到侧边栏）
     // 如果是从画布拖拽的图片，不应该触发文件上传功能
     const canvasImageId = e.dataTransfer.getData('application/canvas-image');
-    const canvasImageBase64 = e.dataTransfer.getData('text/plain');
+    const canvasImageSrc = e.dataTransfer.getData('text/plain');
     
-    if (canvasImageId || (canvasImageBase64 && canvasImageBase64.startsWith('data:image'))) {
+    if (canvasImageId || isDataUrl(canvasImageSrc) || isImageRef(canvasImageSrc)) {
       // 是从画布拖拽的图片，不触发文件上传，直接返回
       setIsDragOver(false);
       return;
@@ -1438,7 +1438,7 @@ const Canvas: React.FC<CanvasProps> = ({
               
               {/* 图片元素 */}
               <img 
-                src={img.src} 
+                src={normalizeImageSrc(img.src)} 
                 alt={img.prompt}
                 // Changed from object-cover to object-fill to support free resize distortion
                 className="w-full h-full object-fill select-none pointer-events-none bg-slate-800 block relative"

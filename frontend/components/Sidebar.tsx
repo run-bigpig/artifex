@@ -9,15 +9,16 @@ import {
   editMultiImagesCancellable
 } from '../services/aiService';
 import { loadChatHistory, saveChatHistory, clearChatHistory, flushChatHistory } from '../services/historyService';
+import { storeImage } from '../services/imageService';
 import ConfirmDialog from './ConfirmDialog';
-import { ensureDataUrl, isDataUrl, isImageRef, normalizeImageSrc } from '../utils/imageSource';
+import { ensureDataUrl, isDataUrl, isImageRef, normalizeImageSrc, toImageRef } from '../utils/imageSource';
 
 interface SidebarProps {
   // Application Actions
   onGenerate: (prompt: string) => Promise<string>;
-  // onEdit now takes base64 strings
+  // onEdit takes image data URLs for AI requests
   onEdit: (prompt: string, base64Sources: string[]) => Promise<string>;
-  onAddToCanvas: (base64: string) => void;
+  onAddToCanvas: (imageSrc: string) => void;
   
   // State from App
   isProcessing: boolean;
@@ -369,8 +370,9 @@ const Sidebar: React.FC<SidebarProps> = ({
     if (isDataUrl(src)) {
       return src;
     }
-    if (isImageRef(src)) {
-      return normalizeImageSrc(src);
+    const ref = toImageRef(src);
+    if (isImageRef(ref)) {
+      return normalizeImageSrc(ref);
     }
     return src;
   };
@@ -401,19 +403,52 @@ const Sidebar: React.FC<SidebarProps> = ({
     return Promise.all(resolvedAttachments.map((att) => ensureDataUrl(att.src)));
   };
 
+  const resolveAttachmentRefs = async (): Promise<string[]> => {
+    const refs: string[] = [];
+
+    for (const att of attachments) {
+      if (att.type === 'canvas') {
+        const img = imageIndex.get(att.content);
+        if (!img?.src) {
+          continue;
+        }
+        const ref = toImageRef(img.src);
+        if (isImageRef(ref)) {
+          refs.push(ref);
+        } else if (isDataUrl(ref)) {
+          refs.push(await storeImage(ref));
+        } else if (ref) {
+          refs.push(ref);
+        }
+        continue;
+      }
+
+      const ref = toImageRef(att.content);
+      if (isImageRef(ref)) {
+        refs.push(ref);
+      } else if (isDataUrl(ref)) {
+        refs.push(await storeImage(ref));
+      } else if (ref) {
+        refs.push(ref);
+      }
+    }
+
+    return refs;
+  };
+
   // --- File Handling Logic ---
 
 
   // 辅助函数：检查图片是否已存在于 attachments 中
   const isImageAlreadyAttached = (src: string): boolean => {
-    const target = normalizeAttachmentSrc(src);
+    const target = toImageRef(src);
     return attachments.some(att => {
       if (att.type === 'local' || att.type === 'url') {
-        return normalizeAttachmentSrc(att.content) === target;
+        return toImageRef(att.content) === target;
       }
       if (att.type === 'canvas') {
         const img = imageIndex.get(att.content);
-        return img ? normalizeAttachmentSrc(img.src) === target : false;
+        return img ? toImageRef(img.src) === target : false;
       }
       return false;
     });
@@ -425,20 +460,26 @@ const Sidebar: React.FC<SidebarProps> = ({
       return;
     }
     const reader = new FileReader();
-    reader.onload = (e) => {
+    reader.onload = async (e) => {
       const base64 = e.target?.result as string;
       if (base64) {
-        // 检查图片是否已存在
-        if (isImageAlreadyAttached(base64)) {
-          // 图片已存在，不重复添加
-          return;
+        try {
+          const imageRef = await storeImage(base64);
+          // 检查图片是否已存在
+          if (isImageAlreadyAttached(imageRef)) {
+            // 图片已存在，不重复添加
+            return;
+          }
+          // Add as attachment, do NOT put on canvas
+          setAttachments(prev => [...prev, {
+            id: Math.random().toString(36).substr(2, 9),
+            type: 'url',
+            content: imageRef
+          }]);
+        } catch (error) {
+          console.error('Failed to store image:', error);
+          addMessage('model', '图片存储失败，请重试。', 'error');
         }
-        // Add as LOCAL attachment, do NOT put on canvas
-        setAttachments(prev => [...prev, {
-          id: Math.random().toString(36).substr(2, 9),
-          type: 'local',
-          content: base64
-        }]);
       }
     };
     reader.readAsDataURL(file);
@@ -477,13 +518,13 @@ const Sidebar: React.FC<SidebarProps> = ({
       if (canvasImageId) {
         const canvasImage = images.find(img => img.id === canvasImageId);
         if (canvasImage) {
-          handleAddToReference(canvasImage.src);
+          void handleAddToReference(canvasImage.src);
           return;
         }
       }
-      // 如果找不到 ID，尝试使用直接传递的 base64
+      // 如果找不到 ID，尝试使用直接传递的数据
       if (canvasImageSrc && (isDataUrl(canvasImageSrc) || isImageRef(canvasImageSrc))) {
-        handleAddToReference(canvasImageSrc);
+        void handleAddToReference(canvasImageSrc);
         return;
       }
     }
@@ -521,7 +562,7 @@ const Sidebar: React.FC<SidebarProps> = ({
     setInputValue(text);
     if (msgImages && msgImages.length > 0) {
       const recoveredAttachments: Attachment[] = msgImages.map((src) => {
-        const normalized = isImageRef(src) ? normalizeImageSrc(src) : src;
+        const normalized = toImageRef(src);
         return {
           id: Math.random().toString(36).substr(2, 9),
           type: isDataUrl(normalized) ? 'local' : 'url',
@@ -533,17 +574,28 @@ const Sidebar: React.FC<SidebarProps> = ({
     textareaRef.current?.focus();
   };
 
-  const handleAddToReference = (src: string) => {
-    if (isImageAlreadyAttached(src)) {
-      return;
-    }
+  const handleAddToReference = async (src: string) => {
+    try {
+      const normalized = toImageRef(src);
+      const imageRef = isImageRef(normalized)
+        ? normalized
+        : isDataUrl(normalized)
+        ? await storeImage(normalized)
+        : normalized;
 
-    const normalized = isImageRef(src) ? normalizeImageSrc(src) : src;
-    setAttachments(prev => [...prev, {
-      id: Math.random().toString(36).substr(2, 9),
-      type: isDataUrl(normalized) ? 'local' : 'url',
-      content: normalized
-    }]);
+      if (isImageAlreadyAttached(imageRef)) {
+        return;
+      }
+
+      setAttachments(prev => [...prev, {
+        id: Math.random().toString(36).substr(2, 9),
+        type: isDataUrl(imageRef) ? 'local' : 'url',
+        content: imageRef
+      }]);
+    } catch (error) {
+      console.error('Failed to add reference image:', error);
+      addMessage('model', '参考图添加失败，请重试。', 'error');
+    }
   };
 
   // --- Prompt Enhancement ---
@@ -654,9 +706,11 @@ const Sidebar: React.FC<SidebarProps> = ({
 
       const currentInput = inputValue;
       let currentBase64s: string[] = [];
+      let currentImageRefs: string[] = [];
       try {
-        // Resolve current attachments to base64 strings for the API
+        // Resolve current attachments to data URLs for the API
         currentBase64s = await resolveAttachmentDataUrls();
+        currentImageRefs = await resolveAttachmentRefs();
       } catch (error) {
         console.error('Failed to resolve attachments:', error);
         addMessage('model', '附件读取失败，请重试', 'error');
@@ -665,7 +719,7 @@ const Sidebar: React.FC<SidebarProps> = ({
       setInputValue('');
 
       // 1. Add User Message
-      addMessage('user', currentInput, 'text', currentBase64s);
+      addMessage('user', currentInput, 'text', currentImageRefs);
       setAttachments([]); // Clear attachments after use
 
       // 2. Add Loading Indicator
@@ -706,7 +760,7 @@ const Sidebar: React.FC<SidebarProps> = ({
       
       try {
         // 等待请求完成
-        const resultBase64 = await request.promise;
+        const resultImageRef = await request.promise;
         
         // 检查请求是否已被取消
         if (request.isAborted()) {
@@ -725,10 +779,10 @@ const Sidebar: React.FC<SidebarProps> = ({
         }
         
         // 添加结果到画布
-        onAddToCanvas(resultBase64);
+        onAddToCanvas(resultImageRef);
         
         // 添加成功消息
-        addMessage('model', '生成完成', 'text', [resultBase64]);
+        addMessage('model', '生成完成', 'text', [resultImageRef]);
 
       } catch (err: any) {
         // 检查是否是取消错误
@@ -915,7 +969,7 @@ const Sidebar: React.FC<SidebarProps> = ({
                                 添加到画布
                               </button>
                                <button 
-                                onClick={() => handleAddToReference(src)}
+                                onClick={() => void handleAddToReference(src)}
                                 className="w-32 px-4 py-2 bg-purple-600/80 text-white rounded-lg hover:bg-purple-600 hover:text-white transition-all hover:scale-105 shadow-xl border border-purple-500/30 text-sm font-medium whitespace-nowrap"
                                 title="作为参考"
                               >

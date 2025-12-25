@@ -21,7 +21,7 @@ import { ChatMessage } from '../types';
 import { CanvasImage, Viewport } from '../types';
 import { serializationWorker } from './serializationWorker';
 import { activityDebounce } from '../utils/activityDebounce';
-import { normalizeImageSrc } from '../utils/imageSource';
+import { toImageRef } from '../utils/imageSource';
 
 // 保存上次的数据快照，用于检测数据是否发生变化
 let lastChatHistorySnapshot: string | null = null;
@@ -45,6 +45,18 @@ const isDataEqual = (data1: any, data2: any): boolean => {
   }
 };
 
+const normalizeChatImagesForSave = (messages: ChatMessage[]): ChatMessage[] =>
+  messages.map((msg) => ({
+    ...msg,
+    images: msg.images ? msg.images.map((img) => toImageRef(img)) : undefined,
+  }));
+
+const normalizeCanvasImagesForSave = (images: CanvasImage[]): CanvasImage[] =>
+  images.map((img) => ({
+    ...img,
+    src: toImageRef(img.src),
+  }));
+
 /**
  * 加载聊天历史记录
  * ✅ 注意：此函数只应在应用启动时调用一次
@@ -58,9 +70,9 @@ export const loadChatHistory = async (): Promise<ChatMessage[]> => {
       lastChatHistorySnapshot = '[]';
       return [];
     }
-    const messages: ChatMessage[] = JSON.parse(historyJSON);
+    const messages: ChatMessage[] = normalizeChatImagesForSave(JSON.parse(historyJSON));
     // 初始化快照，避免首次保存时误判为无变化
-    lastChatHistorySnapshot = historyJSON;
+    lastChatHistorySnapshot = JSON.stringify(messages);
     return messages;
   } catch (error) {
     console.error('Failed to load chat history:', error);
@@ -71,11 +83,12 @@ export const loadChatHistory = async (): Promise<ChatMessage[]> => {
 
 // 内部保存函数（实际执行保存操作）
 const _saveChatHistoryInternal = (messages: ChatMessage[]): void => {
+  const normalizedMessages = normalizeChatImagesForSave(messages);
   // 检测数据是否发生变化
   if (lastChatHistorySnapshot !== null) {
     try {
       const lastMessages = JSON.parse(lastChatHistorySnapshot);
-      if (isDataEqual(messages, lastMessages)) {
+      if (isDataEqual(normalizedMessages, lastMessages)) {
         // 数据未变化，跳过保存
         return;
       }
@@ -88,7 +101,7 @@ const _saveChatHistoryInternal = (messages: ChatMessage[]): void => {
   const startTime = performance.now();
   
   // 使用 Web Worker 异步序列化，避免阻塞主线程
-  serializationWorker.stringify(messages)
+  serializationWorker.stringify(normalizedMessages)
     .then((historyJSON) => {
       const serializeTime = performance.now() - startTime;
       
@@ -107,7 +120,7 @@ const _saveChatHistoryInternal = (messages: ChatMessage[]): void => {
       // 序列化失败时，尝试使用主线程序列化作为后备方案
       try {
         const fallbackStartTime = performance.now();
-        const historyJSON = JSON.stringify(messages);
+        const historyJSON = JSON.stringify(normalizedMessages);
         const fallbackTime = performance.now() - fallbackStartTime;
         
         if (fallbackTime > 100) {
@@ -168,11 +181,11 @@ export const loadCanvasHistory = async (): Promise<{ viewport: Viewport; images:
       viewport: data.viewport || { x: 0, y: 0, zoom: 1 },
       images: (data.images || []).map((img: CanvasImage) => ({
         ...img,
-        src: normalizeImageSrc(img.src)
+        src: toImageRef(img.src)
       }))
     };
     // 初始化快照，避免首次保存时误判为无变化
-    lastCanvasHistorySnapshot = historyJSON;
+    lastCanvasHistorySnapshot = JSON.stringify(result);
     return result;
   } catch (error) {
     console.error('Failed to load canvas history:', error);
@@ -184,9 +197,10 @@ export const loadCanvasHistory = async (): Promise<{ viewport: Viewport; images:
 
 // 内部保存函数（实际执行保存操作）
 const _saveCanvasHistoryInternal = (viewport: Viewport, images: CanvasImage[]): void => {
+  const normalizedImages = normalizeCanvasImagesForSave(images);
   const data = {
     viewport,
-    images
+    images: normalizedImages
   };
   
   // 检测数据是否发生变化
@@ -283,11 +297,12 @@ export const flushCanvasHistory = (viewport: Viewport, images: CanvasImage[]): v
  * @returns Promise，保存完成后 resolve
  */
 export const saveChatHistorySync = async (messages: ChatMessage[]): Promise<void> => {
+  const normalizedMessages = normalizeChatImagesForSave(messages);
   try {
     const startTime = performance.now();
     
     // 使用 Web Worker 异步序列化
-    const historyJSON = await serializationWorker.stringify(messages);
+    const historyJSON = await serializationWorker.stringify(normalizedMessages);
     const serializeTime = performance.now() - startTime;
     
     if (serializeTime > 100) {
@@ -304,7 +319,7 @@ export const saveChatHistorySync = async (messages: ChatMessage[]): Promise<void
   } catch (error) {
     // 后备方案：使用主线程序列化
     try {
-      const historyJSON = JSON.stringify(messages);
+      const historyJSON = JSON.stringify(normalizedMessages);
       await SaveChatHistorySync(historyJSON);
     } catch (fallbackError) {
       console.error('Failed to save chat history:', fallbackError);
@@ -322,7 +337,7 @@ export const saveChatHistorySync = async (messages: ChatMessage[]): Promise<void
  * @returns Promise，保存完成后 resolve
  */
 export const saveCanvasHistorySync = async (viewport: Viewport, images: CanvasImage[]): Promise<void> => {
-  const data = { viewport, images };
+  const data = { viewport, images: normalizeCanvasImagesForSave(images) };
   
   try {
     const startTime = performance.now();

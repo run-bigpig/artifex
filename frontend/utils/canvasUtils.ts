@@ -4,6 +4,7 @@
  */
 
 import { Viewport, Point, ExpandOffsets } from '../types';
+import { normalizeImageSrc } from './imageSource';
 
 /**
  * 将世界坐标转换为屏幕坐标
@@ -50,6 +51,7 @@ export const screenToWorld = (
 export const getPngBlob = (src: string): Promise<Blob> => {
   return new Promise((resolve, reject) => {
     const img = new Image();
+    const normalizedSrc = normalizeImageSrc(src);
     
     img.onload = () => {
       try {
@@ -84,7 +86,7 @@ export const getPngBlob = (src: string): Promise<Blob> => {
       reject(new Error('图片加载失败'));
     };
     
-    img.src = src;
+    img.src = normalizedSrc;
   });
 };
 
@@ -154,15 +156,16 @@ export const createDragPreviewThumbnailSync = (
 export const getImageNaturalDimensions = (imgSrc: string): Promise<{ width: number; height: number }> => {
   return new Promise((resolve, reject) => {
     const img = new Image();
+    const normalizedSrc = normalizeImageSrc(imgSrc);
     img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });
     img.onerror = () => reject(new Error('图片加载失败'));
-    img.src = imgSrc;
+    img.src = normalizedSrc;
   });
 };
 
 /**
  * 生成带白边画布的扩展图片
- * @param imgSrc 原始图片源（base64）
+ * @param imgSrc 原始图片源（data URL 或 image ref）
  * @param offsets 扩展偏移量（基于原始尺寸的像素值）
  * @returns Promise<string> 扩展后的 base64 图片
  * @throws 如果图片加载失败或 Canvas 操作失败
@@ -173,6 +176,7 @@ export const generateExpandedImage = async (
 ): Promise<string> => {
   return new Promise((resolve, reject) => {
     const imageElement = new Image();
+    const normalizedSrc = normalizeImageSrc(imgSrc);
     
     imageElement.onload = () => {
       try {
@@ -216,7 +220,7 @@ export const generateExpandedImage = async (
       reject(new Error('图片加载失败'));
     };
     
-    imageElement.src = imgSrc;
+    imageElement.src = normalizedSrc;
   });
 };
 

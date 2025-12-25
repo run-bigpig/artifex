@@ -5,8 +5,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
@@ -15,7 +17,8 @@ import (
 // FileService 文件管理服务
 // 提供图片导出功能
 type FileService struct {
-	ctx context.Context
+	ctx          context.Context
+	imageStorage *ImageStorage
 }
 
 // NewFileService 创建文件服务实例
@@ -26,10 +29,37 @@ func NewFileService() *FileService {
 // Startup 在应用启动时调用
 func (f *FileService) Startup(ctx context.Context) {
 	f.ctx = ctx
+
+	exeDir, err := getExecutableDir()
+	if err != nil {
+		fmt.Printf("[FileService] Warning: failed to get executable dir: %v\n", err)
+		return
+	}
+
+	dataDir := filepath.Join(exeDir, "config")
+	f.imageStorage = NewImageStorage(dataDir)
+	if err := f.imageStorage.Initialize(); err != nil {
+		fmt.Printf("[FileService] Warning: failed to initialize image storage: %v\n", err)
+	}
+}
+
+func normalizeImageRef(source string) string {
+	if strings.HasPrefix(source, "/images/") {
+		return strings.TrimPrefix(source, "/")
+	}
+	if strings.HasPrefix(source, "images/") {
+		return source
+	}
+	if strings.HasPrefix(source, "http://") || strings.HasPrefix(source, "https://") {
+		if parsed, err := url.Parse(source); err == nil && strings.HasPrefix(parsed.Path, "/images/") {
+			return strings.TrimPrefix(parsed.Path, "/")
+		}
+	}
+	return source
 }
 
 // ExportImage 导出图像到文件
-// imageDataURL: base64 编码的图像数据 (data:image/png;base64,...)
+// imageDataURL: data URL 或 image ref (images/...)
 // suggestedName: 建议的文件名
 // format: 导出格式 ("png", "jpeg", "webp")，如果为空则从文件名推断
 // exportDir: 导出目录（可选），如果为空则显示文件保存对话框
@@ -100,6 +130,30 @@ func (f *FileService) ExportImage(imageDataURL string, suggestedName string, for
 			return "", nil
 		}
 	}
+	
+	normalized := normalizeImageRef(imageDataURL)
+	if strings.HasPrefix(normalized, "images/") {
+		if f.imageStorage == nil {
+			return "", fmt.Errorf("image storage not initialized")
+		}
+
+		imagePath, err := f.imageStorage.GetImagePath(normalized)
+		if err != nil {
+			return "", err
+		}
+
+		imageData, err := os.ReadFile(imagePath)
+		if err != nil {
+			return "", fmt.Errorf("failed to read image file: %w", err)
+		}
+
+		if err := os.WriteFile(filePath, imageData, 0644); err != nil {
+			return "", fmt.Errorf("failed to write image file: %w", err)
+		}
+
+		return filePath, nil
+	}
+
 
 	// 解析 base64 数据
 	// 格式: data:image/png;base64,iVBORw0KGgo...
@@ -174,6 +228,35 @@ func (f *FileService) ExportSliceImages(slicesJSON string) (string, error) {
 
 	// 保存每个切片
 	for _, slice := range slices {
+		normalized := normalizeImageRef(slice.DataURL)
+		if strings.HasPrefix(normalized, "images/") {
+			if f.imageStorage == nil {
+				continue
+			}
+
+			imagePath, err := f.imageStorage.GetImagePath(normalized)
+			if err != nil {
+				continue
+			}
+
+			imageData, err := os.ReadFile(imagePath)
+			if err != nil {
+				continue
+			}
+
+			// 生成文件名
+			fileName := fmt.Sprintf("slice-%d.png", slice.ID+1)
+			filePath := filepath.Join(dirPath, fileName)
+
+			// 写入文件
+			if err := os.WriteFile(filePath, imageData, 0644); err != nil {
+				continue
+			}
+
+			savedPaths = append(savedPaths, filePath)
+			continue
+		}
+
 		// 解析 base64 数据
 		const base64Prefix = "data:image/"
 		if len(slice.DataURL) < len(base64Prefix) {

@@ -65,7 +65,7 @@ func (a *App) Shutdown(ctx context.Context) {
 // ===== 文件管理服务方法 =====
 
 // ExportImage 导出图像
-// imageDataURL: base64 编码的图像数据
+// imageDataURL: data URL 或 image ref (images/...)
 // suggestedName: 建议的文件名
 // format: 导出格式 ("png", "jpeg", "webp")，如果为空则从文件名推断
 // exportDir: 导出目录（可选），如果为空则显示文件保存对话框
@@ -77,6 +77,12 @@ func (a *App) ExportImage(imageDataURL string, suggestedName string, format stri
 func (a *App) ExportSliceImages(slicesJSON string) (string, error) {
 	return a.fileService.ExportSliceImages(slicesJSON)
 }
+
+// StoreImage persists a data URL and returns an image ref.
+func (a *App) StoreImage(imageDataURL string) (string, error) {
+	return a.historyService.StoreImage(imageDataURL)
+}
+
 
 // ===== 配置管理服务方法 =====
 

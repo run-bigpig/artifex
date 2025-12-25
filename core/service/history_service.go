@@ -475,6 +475,23 @@ func (h *HistoryService) saveCanvasHistorySync(canvasHistoryJSON string) error {
 	return nil
 }
 
+// StoreImage persists a data URL and returns an image ref.
+func (h *HistoryService) StoreImage(dataURL string) (string, error) {
+	if dataURL == "" {
+		return "", nil
+	}
+	if strings.HasPrefix(dataURL, "/images/") {
+		return strings.TrimPrefix(dataURL, "/"), nil
+	}
+	if strings.HasPrefix(dataURL, "images/") {
+		return dataURL, nil
+	}
+	if h.imageStorage == nil {
+		return "", fmt.Errorf("image storage not initialized")
+	}
+	return h.imageStorage.SaveImage(dataURL)
+}
+
 // ==================== 同步保存 API（用于应用关闭时）====================
 
 // SaveChatHistorySync 同步保存聊天历史记录（公共方法，直接保存，不走事件队列）

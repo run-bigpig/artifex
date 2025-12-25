@@ -5,23 +5,26 @@ import Sidebar from './components/Sidebar';
 import Header from './components/Header';
 import LoadingOverlay from './components/LoadingOverlay';
 import { generateImage, editMultiImages } from './services/aiService';
+import { storeImage } from './services/imageService';
 import { loadCanvasHistory, saveCanvasHistory, flushCanvasHistory, saveCanvasHistorySync, saveChatHistorySync, flushChatHistory } from './services/historyService';
 import { ChatMessage } from './types';
 import { serializationWorker } from './services/serializationWorker';
 import { ImageIndex, hasImagesChanged } from './utils/imageIndex';
+import { normalizeImageSrc } from './utils/imageSource';
 import { activityDetector } from './services/activityDetector';
 import SaveProgressOverlay from './components/SaveProgressOverlay';
 import { Quit } from './wailsjs/runtime/runtime';
 
 const generateId = () => Math.random().toString(36).substr(2, 9);
 
-// Helper to get image dimensions from base64 string
+// Helper to get image dimensions from data URLs or image refs
 const loadImageDimensions = (src: string): Promise<{ width: number; height: number }> => {
   return new Promise((resolve, reject) => {
     const img = new Image();
+    const normalizedSrc = normalizeImageSrc(src);
     img.onload = () => resolve({ width: img.width, height: img.height });
     img.onerror = (e) => reject(e);
-    img.src = src;
+    img.src = normalizedSrc;
   });
 };
 
@@ -213,16 +216,20 @@ const App: React.FC = () => {
   };
 
   // 处理扩图生成完成
-  const handleGenerateExpanded = (imageId: string, expandedBase64: string) => {
+  const handleGenerateExpanded = async (imageId: string, expandedBase64: string) => {
     // 1. 首先清空参考图输入框的内容
     setAttachments([]);
-    
-    // 2. 然后将扩图后的图片添加到参考图列表
-    setAttachments([{
-      id: generateId(),
-      type: 'local',
-      content: expandedBase64
-    }]);
+    try {
+      const imageRef = await storeImage(expandedBase64);
+      // 2. 然后将扩图后的图片添加到参考图列表
+      setAttachments([{
+        id: generateId(),
+        type: 'url',
+        content: imageRef
+      }]);
+    } catch (error) {
+      console.error('Failed to store expanded image:', error);
+    }
 
     // 3. 自动在提示词输入框中写入"扩图"关键词
     setSidebarInputValue('扩图');
@@ -231,9 +238,10 @@ const App: React.FC = () => {
     setSelectedImageId(null);
   };
 
-  const handleImportImage = async (base64: string, dropX?: number, dropY?: number) => {
+  const handleImportImage = async (imageSrc: string, dropX?: number, dropY?: number) => {
     try {
-      const { width, height } = await loadImageDimensions(base64);
+      const imageRef = await storeImage(imageSrc);
+      const { width, height } = await loadImageDimensions(imageRef);
 
       // Constrain image size to fit within canvas viewport while maintaining aspect ratio
       const { width: finalWidth, height: finalHeight } = constrainImageSize(width, height);
@@ -254,7 +262,7 @@ const App: React.FC = () => {
 
       const newImage: CanvasImage = {
         id: newId,
-        src: base64,
+        src: imageRef,
         x: xPos,
         y: yPos,
         width: finalWidth,
@@ -281,8 +289,8 @@ const App: React.FC = () => {
         aspectRatio: modelSettings.aspectRatio || '1:1',
         imageSize: modelSettings.imageSize || '1K'
       };
-      const base64 = await generateImage(prompt, settingsForGenerate);
-      const { width, height } = await loadImageDimensions(base64);
+      const imageRef = await generateImage(prompt, settingsForGenerate);
+      const { width, height } = await loadImageDimensions(imageRef);
 
       // Constrain image size to fit within canvas viewport while maintaining aspect ratio
       const { width: finalWidth, height: finalHeight } = constrainImageSize(width, height);
@@ -291,7 +299,7 @@ const App: React.FC = () => {
 
       const newImage: CanvasImage = {
         id: generateId(),
-        src: base64,
+        src: imageRef,
         x: pos.x,
         y: pos.y,
         width: finalWidth,
@@ -302,7 +310,7 @@ const App: React.FC = () => {
 
       setImages(prev => [...prev, newImage]);
       setSelectedImageId(newImage.id);
-      return base64;
+      return imageRef;
     } catch (error) {
       console.error(error);
       throw error;
@@ -318,13 +326,13 @@ const App: React.FC = () => {
     try {
       // 使用统一的 editMultiImages 方法（支持单图和多图）
       // 如果 aspectRatio 或 imageSize 为空字符串，则不传递这些参数（保持原图）
-      const newBase64 = await editMultiImages(
+      const imageRef = await editMultiImages(
         base64Sources,
         prompt,
         modelSettings.imageSize || undefined,
         modelSettings.aspectRatio || undefined
       );
-      const { width, height } = await loadImageDimensions(newBase64);
+      const { width, height } = await loadImageDimensions(imageRef);
 
       // Constrain image size to fit within canvas viewport while maintaining aspect ratio
       const { width: finalWidth, height: finalHeight } = constrainImageSize(width, height);
@@ -334,7 +342,7 @@ const App: React.FC = () => {
 
       const newImage: CanvasImage = {
         id: generateId(),
-        src: newBase64,
+        src: imageRef,
         width: finalWidth,
         height: finalHeight,
         x: pos.x + 40,
@@ -345,7 +353,7 @@ const App: React.FC = () => {
 
       setImages(prev => [...prev, newImage]);
       setSelectedImageId(newImage.id);
-      return newBase64;
+      return imageRef;
     } catch (error) {
       console.error(error);
       throw error;
@@ -355,7 +363,7 @@ const App: React.FC = () => {
   };
 
   // Wrapper for sidebar to add to canvas without coords
-  const handleAddToCanvas = (base64: string) => handleImportImage(base64);
+  const handleAddToCanvas = (imageSrc: string) => handleImportImage(imageSrc);
 
   // ✅ 修复：使用 useCallback 包装回调，避免 Sidebar 的 useEffect 重复执行
   // 处理聊天历史加载完成回调

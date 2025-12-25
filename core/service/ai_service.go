@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
+	"strings"
 	"sync"
 )
 
@@ -24,6 +26,7 @@ type AIService struct {
 
 	// Context 管理器，用于管理每个请求的 context
 	contextManager *ContextManager
+	imageStorage   *ImageStorage
 }
 
 // NewAIService 创建 AI 服务实例
@@ -37,11 +40,22 @@ func NewAIService(configService *ConfigService) *AIService {
 // Startup 在应用启动时调用
 func (a *AIService) Startup(ctx context.Context) {
 	a.ctx = ctx
-	// 初始化 Context 管理器
 	a.contextManager = NewContextManager(ctx)
-	// 启动定期清理协程
 	a.contextManager.StartCleanupRoutine()
+
+	exeDir, err := getExecutableDir()
+	if err != nil {
+		fmt.Printf("[AIService] Warning: failed to get executable dir: %v\n", err)
+		return
+	}
+
+	dataDir := filepath.Join(exeDir, "config")
+	a.imageStorage = NewImageStorage(dataDir)
+	if err := a.imageStorage.Initialize(); err != nil {
+		fmt.Printf("[AIService] Warning: failed to initialize image storage: %v\n", err)
+	}
 }
+
 
 // ==================== 提供商管理方法 ====================
 
@@ -195,34 +209,46 @@ func (a *AIService) GenerateImage(paramsJSON string, requestID string) (string, 
 		return "", fmt.Errorf("invalid parameters: %w", err)
 	}
 
-	// 为请求创建独立的 context
 	reqCtx, err := a.contextManager.CreateRequestContext(requestID)
 	if err != nil {
 		return "", fmt.Errorf("failed to create request context: %w", err)
 	}
-	// 请求完成后清理 context
 	defer a.contextManager.CleanupRequest(requestID)
 
-	// 获取当前提供商
 	aiProvider, err := a.getCurrentProvider()
 	if err != nil {
 		return "", err
 	}
 
-	// 检查功能支持
 	caps := aiProvider.GetCapabilities()
 	if !caps.GenerateImage {
 		return "", fmt.Errorf("aiProvider %s does not support image generation", aiProvider.Name())
 	}
 
-	// 如果有参考图像，检查是否支持
 	if params.ReferenceImage != "" && !caps.ReferenceImage {
 		return "", fmt.Errorf("aiProvider %s does not support reference image", aiProvider.Name())
 	}
 
-	// 委托给提供商，使用请求的 context
-	return aiProvider.GenerateImage(reqCtx, params)
+	if params.ReferenceImage != "" {
+		params.ReferenceImage, err = a.normalizeImageInput(params.ReferenceImage)
+		if err != nil {
+			return "", err
+		}
+	}
+	if params.SketchImage != "" {
+		params.SketchImage, err = a.normalizeImageInput(params.SketchImage)
+		if err != nil {
+			return "", err
+		}
+	}
+
+	result, err := aiProvider.GenerateImage(reqCtx, params)
+	if err != nil {
+		return "", err
+	}
+	return a.storeImageResult(result)
 }
+
 
 // EditMultiImages 编辑图像（支持单图或多图）
 // 统一使用多图编辑方法，即使只有一张图也使用此方法
@@ -233,64 +259,74 @@ func (a *AIService) EditMultiImages(paramsJSON string, requestID string) (string
 		return "", fmt.Errorf("invalid parameters: %w", err)
 	}
 
-	// 验证图片数量
 	if len(params.Images) < 1 {
 		return "", fmt.Errorf("at least 1 image is required")
 	}
-	// 为请求创建独立的 context
 	reqCtx, err := a.contextManager.CreateRequestContext(requestID)
 	if err != nil {
 		return "", fmt.Errorf("failed to create request context: %w", err)
 	}
-	// 请求完成后清理 context
 	defer a.contextManager.CleanupRequest(requestID)
 
-	// 获取当前提供商
 	aiProvider, err := a.getCurrentProvider()
 	if err != nil {
 		return "", err
 	}
 
-	// 检查功能支持
 	caps := aiProvider.GetCapabilities()
 	if !caps.EditImage {
 		return "", fmt.Errorf("aiProvider %s does not support image editing", aiProvider.Name())
 	}
-	// 使用多图编辑方法，使用请求的 context
-	return aiProvider.EditMultiImages(reqCtx, params)
+
+	params.Images, err = a.normalizeImageInputs(params.Images)
+	if err != nil {
+		return "", err
+	}
+
+	result, err := aiProvider.EditMultiImages(reqCtx, params)
+	if err != nil {
+		return "", err
+	}
+	return a.storeImageResult(result)
 }
+
 
 // RemoveBackground 移除背景
 // requestID: 请求 ID，用于管理 context 和取消请求
 func (a *AIService) RemoveBackground(imageData string, requestID string) (string, error) {
-	// 为请求创建独立的 context
 	reqCtx, err := a.contextManager.CreateRequestContext(requestID)
 	if err != nil {
 		return "", fmt.Errorf("failed to create request context: %w", err)
 	}
-	// 请求完成后清理 context
 	defer a.contextManager.CleanupRequest(requestID)
 
-	// 获取当前提供商
 	aiProvider, err := a.getCurrentProvider()
 	if err != nil {
 		return "", err
 	}
 
-	// 检查功能支持
 	caps := aiProvider.GetCapabilities()
 	if !caps.RemoveBackground {
 		return "", fmt.Errorf("aiProvider %s does not support background removal", aiProvider.Name())
 	}
 
-	// 使用多图编辑功能实现背景移除
+	normalized, err := a.normalizeImageInput(imageData)
+	if err != nil {
+		return "", err
+	}
+
 	multiParams := types.MultiImageEditParams{
-		Images: []string{imageData},
+		Images: []string{normalized},
 		Prompt: "Remove the background from this image. Keep the main subject intact with high quality. Return the image with transparent background.",
 	}
 
-	return aiProvider.EditMultiImages(reqCtx, multiParams)
+	result, err := aiProvider.EditMultiImages(reqCtx, multiParams)
+	if err != nil {
+		return "", err
+	}
+	return a.storeImageResult(result)
 }
+
 
 // EnhancePrompt 增强提示词
 // paramsJSON: JSON 格式的 EnhancePromptParams，包含 prompt 和可选的 referenceImages
@@ -301,36 +337,103 @@ func (a *AIService) EnhancePrompt(paramsJSON string, requestID string) (string, 
 		return "", fmt.Errorf("invalid parameters: %w", err)
 	}
 
-	// 为请求创建独立的 context
 	reqCtx, err := a.contextManager.CreateRequestContext(requestID)
 	if err != nil {
 		return "", fmt.Errorf("failed to create request context: %w", err)
 	}
-	// 请求完成后清理 context
 	defer a.contextManager.CleanupRequest(requestID)
 
-	// 获取当前提供商
 	aiProvider, err := a.getCurrentProvider()
 	if err != nil {
 		return "", err
 	}
 
-	// 检查功能支持
 	caps := aiProvider.GetCapabilities()
 	if !caps.EnhancePrompt {
 		return "", fmt.Errorf("aiProvider %s does not support prompt enhancement", aiProvider.Name())
 	}
 
-	// 如果有参考图像，检查是否支持
 	if len(params.ReferenceImages) > 0 && !caps.ReferenceImage {
 		return "", fmt.Errorf("aiProvider %s does not support reference images for prompt enhancement", aiProvider.Name())
 	}
 
-	// 委托给提供商，使用请求的 context
+	if len(params.ReferenceImages) > 0 {
+		params.ReferenceImages, err = a.normalizeImageInputs(params.ReferenceImages)
+		if err != nil {
+			return "", err
+		}
+	}
+
 	return aiProvider.EnhancePrompt(reqCtx, params)
 }
 
+
 // CancelRequest 取消指定请求
+func (a *AIService) normalizeImageInput(imageData string) (string, error) {
+	if imageData == "" {
+		return "", nil
+	}
+	if strings.HasPrefix(imageData, "data:") {
+		return imageData, nil
+	}
+	if strings.HasPrefix(imageData, "images/") || strings.HasPrefix(imageData, "/images/") {
+		if a.imageStorage == nil {
+			return "", fmt.Errorf("image storage not initialized")
+		}
+		return a.imageStorage.LoadImage(imageData)
+	}
+	return imageData, nil
+}
+
+func (a *AIService) normalizeImageInputs(images []string) ([]string, error) {
+	if len(images) == 0 {
+		return images, nil
+	}
+	result := make([]string, len(images))
+	for i, img := range images {
+		if img == "" {
+			result[i] = ""
+			continue
+		}
+		normalized, err := a.normalizeImageInput(img)
+		if err != nil {
+			return nil, err
+		}
+		result[i] = normalized
+	}
+	return result, nil
+}
+
+func (a *AIService) storeImageResult(imageData string) (string, error) {
+	if imageData == "" {
+		return "", fmt.Errorf("empty image data")
+	}
+	if strings.HasPrefix(imageData, "/images/") {
+		return strings.TrimPrefix(imageData, "/"), nil
+	}
+	if strings.HasPrefix(imageData, "images/") {
+		return imageData, nil
+	}
+	if a.imageStorage == nil {
+		return imageData, nil
+	}
+	if strings.HasPrefix(imageData, "data:") {
+		return a.imageStorage.SaveImage(imageData)
+	}
+	if strings.HasPrefix(imageData, "http://") || strings.HasPrefix(imageData, "https://") {
+		return a.imageStorage.SaveImageFromURL(imageData)
+	}
+	if looksLikeBase64Image(imageData) {
+		return a.imageStorage.SaveImage("data:image/png;base64," + imageData)
+	}
+	return imageData, nil
+}
+
+func looksLikeBase64Image(data string) bool {
+	trimmed := strings.TrimSpace(data)
+	return strings.HasPrefix(trimmed, "iVBORw0KGgo") || strings.HasPrefix(trimmed, "/9j/")
+}
+
 func (a *AIService) CancelRequest(requestID string) error {
 	if a.contextManager == nil {
 		return fmt.Errorf("context manager not initialized")

@@ -84,8 +84,8 @@ function createCancellableRequest<T>(
  */
 interface GenerateImageParams {
   prompt: string;
-  referenceImage?: string; // base64 编码的参考图像
-  sketchImage?: string; // base64 编码的草图图像
+  referenceImage?: string; // data URL 参考图像
+  sketchImage?: string; // data URL 草图图像
   imageSize: string; // "1K", "2K", "4K"
   aspectRatio: string; // "1:1", "16:9", "9:16", "3:4", "4:3"
 }
@@ -94,7 +94,7 @@ interface GenerateImageParams {
  * 多图编辑参数接口（与 Go 后端 MultiImageEditParams 对应）
  */
 interface MultiImageEditParams {
-  images: string[]; // base64 编码的图像数组（支持单图或多图）
+  images: string[]; // data URL 图像数组（支持单图或多图）
   prompt: string; // 编辑提示词
   imageSize?: string; // 图片尺寸，可选值："1K", "2K", "4K"（可选）
   aspectRatio?: string; // 宽高比，可选值："1:1", "16:9", "9:16", "3:4", "4:3"（可选）
@@ -105,7 +105,7 @@ interface MultiImageEditParams {
  */
 interface EnhancePromptParams {
   prompt: string;
-  referenceImages?: string[]; // base64 编码的参考图像数组（可选）
+  referenceImages?: string[]; // data URL 参考图像数组（可选）
 }
 
 // ==================== 图像生成 ====================
@@ -114,10 +114,10 @@ interface EnhancePromptParams {
  * 生成图像
  * @param prompt 提示词
  * @param settings 模型设置（可选）
- * @param referenceImage 可选的参考图像（base64）
- * @param sketchImage 可选的草图图像（base64）
+ * @param referenceImage 可选的参考图像（data URL）
+ * @param sketchImage 可选的草图图像（data URL）
  * @param requestID 请求 ID（可选，如果不提供会自动生成）
- * @returns base64 编码的图像数据
+ * @returns image ref URL
  * @throws 如果生成失败会抛出错误
  */
 export const generateImage = async (
@@ -155,8 +155,8 @@ export const generateImage = async (
  * 生成图像（可取消版本）
  * @param prompt 提示词
  * @param settings 模型设置（可选）
- * @param referenceImage 可选的参考图像（base64）
- * @param sketchImage 可选的草图图像（base64）
+ * @param referenceImage 可选的参考图像（data URL）
+ * @param sketchImage 可选的草图图像（data URL）
  * @returns 可取消的请求对象
  */
 export const generateImageCancellable = (
@@ -178,12 +178,12 @@ export const generateImageCancellable = (
  * 编辑图像（支持单图或多图）
  * 统一使用多图编辑方法，即使只有一张图也使用此方法。
  * 
- * @param base64Images base64 编码的图像数组（支持单图或多图）
+ * @param base64Images data URL 图像数组（支持单图或多图）
  * @param prompt 编辑提示词
  * @param imageSize 图片尺寸，可选值："1K", "2K", "4K"（可选，仅 Gemini Provider 支持）
  * @param aspectRatio 宽高比，可选值："1:1", "16:9", "9:16", "3:4", "4:3"（可选，仅 Gemini Provider 支持）
  * @param requestID 请求 ID（可选，如果不提供会自动生成）
- * @returns base64 编码的编辑后图像数据
+ * @returns image ref URL
  * @throws 如果编辑失败会抛出错误
  */
 export const editMultiImages = async (
@@ -224,7 +224,7 @@ export const editMultiImages = async (
 
 /**
  * 编辑图像（可取消版本）
- * @param base64Images base64 编码的图像数组（支持单图或多图）
+ * @param base64Images data URL 图像数组（支持单图或多图）
  * @param prompt 编辑提示词
  * @param imageSize 图片尺寸，可选值："1K", "2K", "4K"（可选）
  * @param aspectRatio 宽高比，可选值："1:1", "16:9", "9:16", "3:4", "4:3"（可选）
@@ -250,7 +250,7 @@ export const editMultiImagesCancellable = (
  * 支持基于参考图像的提示词增强，AI 会分析参考图像的视觉风格、光照、构图等特征。
  * 
  * @param prompt 原始提示词
- * @param referenceImages 可选的参考图像数组（base64）
+ * @param referenceImages 可选的参考图像数组（data URL）
  * @param requestID 请求 ID（可选，如果不提供会自动生成）
  * @returns 增强后的提示词。如果增强失败，返回原始提示词
  */
@@ -281,7 +281,7 @@ export const enhancePrompt = async (
 /**
  * 增强提示词（可取消版本）
  * @param prompt 原始提示词
- * @param referenceImages 可选的参考图像数组（base64）
+ * @param referenceImages 可选的参考图像数组（data URL）
  * @returns 可取消的请求对象
  */
 export const enhancePromptCancellable = (
@@ -294,5 +294,4 @@ export const enhancePromptCancellable = (
     requestID
   );
 };
-
 
