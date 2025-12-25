@@ -222,6 +222,9 @@ func (s *ImageStorage) getImageRef(fileName string) string {
 // parseImageRef 解析图片引用，返回文件名
 func (s *ImageStorage) parseImageRef(imageRef string) string {
 	// 移除 "images/" 前缀
+	if strings.HasPrefix(imageRef, "/images/") {
+		return strings.TrimPrefix(imageRef, "/images/")
+	}
 	if strings.HasPrefix(imageRef, "images/") {
 		return strings.TrimPrefix(imageRef, "images/")
 	}

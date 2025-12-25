@@ -10,6 +10,7 @@ import {
 } from '../services/aiService';
 import { loadChatHistory, saveChatHistory, clearChatHistory, flushChatHistory } from '../services/historyService';
 import ConfirmDialog from './ConfirmDialog';
+import { ensureDataUrl, isDataUrl, isImageRef, normalizeImageSrc } from '../utils/imageSource';
 
 interface SidebarProps {
   // Application Actions
@@ -110,6 +111,22 @@ const Sidebar: React.FC<SidebarProps> = ({
     onChatHistoryLoadedRef.current = onChatHistoryLoaded;
   }, [onChatHistoryLoaded]);
 
+  const sanitizeInterruptedMessages = (items: ChatMessage[]) => {
+    let hasInterrupted = false;
+    const sanitized = items.map((msg) => {
+      if (msg.id.startsWith('loading-') && msg.type === 'system') {
+        hasInterrupted = true;
+        return {
+          ...msg,
+          type: 'error',
+          text: '生成中断，请重试'
+        };
+      }
+      return msg;
+    });
+    return { sanitized, hasInterrupted };
+  };
+
   // ✅ 应用启动时加载聊天历史记录（只执行一次）
   useEffect(() => {
     // 防止重复加载
@@ -125,8 +142,12 @@ const Sidebar: React.FC<SidebarProps> = ({
         const savedMessages = await loadChatHistory();
         let finalMessages: ChatMessage[];
         if (savedMessages.length > 0) {
-          finalMessages = savedMessages;
-          setMessages(savedMessages);
+          const { sanitized, hasInterrupted } = sanitizeInterruptedMessages(savedMessages);
+          finalMessages = sanitized;
+          setMessages(sanitized);
+          if (hasInterrupted) {
+            flushChatHistory(sanitized);
+          }
         } else {
           // 如果没有历史记录，显示欢迎消息
           finalMessages = [
@@ -344,15 +365,28 @@ const Sidebar: React.FC<SidebarProps> = ({
     return index;
   }, [images]);
 
+  const normalizeAttachmentSrc = (src: string): string => {
+    if (isDataUrl(src)) {
+      return src;
+    }
+    if (isImageRef(src)) {
+      return normalizeImageSrc(src);
+    }
+    return src;
+  };
+
   // Helper to resolve attachments to viewable objects
   const resolveAttachment = (att: Attachment): { id: string, src: string } | null => {
     if (att.type === 'local') {
-      return { id: att.id, src: att.content };
-    } else {
-      // Canvas type - ✅ 使用索引 O(1) 查找，而不是 O(n) 的 find
-      const img = imageIndex.get(att.content);
-      if (img) return { id: att.id, src: img.src };
+      return { id: att.id, src: normalizeAttachmentSrc(att.content) };
     }
+    if (att.type === 'url') {
+      return { id: att.id, src: normalizeAttachmentSrc(att.content) };
+    }
+
+    // Canvas type - use index for O(1) lookup
+    const img = imageIndex.get(att.content);
+    if (img) return { id: att.id, src: normalizeAttachmentSrc(img.src) };
     return null;
   };
 
@@ -360,23 +394,26 @@ const Sidebar: React.FC<SidebarProps> = ({
     .map(resolveAttachment)
     .filter((a): a is { id: string, src: string } => a !== null);
 
+  const resolveAttachmentDataUrls = async (): Promise<string[]> => {
+    if (resolvedAttachments.length === 0) {
+      return [];
+    }
+    return Promise.all(resolvedAttachments.map((att) => ensureDataUrl(att.src)));
+  };
 
   // --- File Handling Logic ---
 
+
   // 辅助函数：检查图片是否已存在于 attachments 中
-  const isImageAlreadyAttached = (base64: string): boolean => {
-    // 检查所有 local 类型的 attachments
+  const isImageAlreadyAttached = (src: string): boolean => {
+    const target = normalizeAttachmentSrc(src);
     return attachments.some(att => {
-      if (att.type === 'local') {
-        // 直接比较 base64 字符串
-        return att.content === base64;
+      if (att.type === 'local' || att.type === 'url') {
+        return normalizeAttachmentSrc(att.content) === target;
       }
-      // 对于 canvas 类型的 attachment，需要检查对应的图片 src
       if (att.type === 'canvas') {
         const img = imageIndex.get(att.content);
-        if (img && img.src === base64) {
-          return true;
-        }
+        return img ? normalizeAttachmentSrc(img.src) === target : false;
       }
       return false;
     });
@@ -433,9 +470,9 @@ const Sidebar: React.FC<SidebarProps> = ({
     
     // 优先处理从画布拖拽的图片
     const canvasImageId = e.dataTransfer.getData('application/canvas-image');
-    const canvasImageBase64 = e.dataTransfer.getData('text/plain');
+    const canvasImageSrc = e.dataTransfer.getData('text/plain');
     
-    if (canvasImageId || canvasImageBase64) {
+    if (canvasImageId || canvasImageSrc) {
       // 从画布拖拽的图片：查找对应的图片数据
       if (canvasImageId) {
         const canvasImage = images.find(img => img.id === canvasImageId);
@@ -445,8 +482,8 @@ const Sidebar: React.FC<SidebarProps> = ({
         }
       }
       // 如果找不到 ID，尝试使用直接传递的 base64
-      if (canvasImageBase64 && canvasImageBase64.startsWith('data:image')) {
-        handleAddToReference(canvasImageBase64);
+      if (canvasImageSrc && (isDataUrl(canvasImageSrc) || isImageRef(canvasImageSrc))) {
+        handleAddToReference(canvasImageSrc);
         return;
       }
     }
@@ -483,27 +520,29 @@ const Sidebar: React.FC<SidebarProps> = ({
   const handleReusePrompt = (text: string, msgImages?: string[]) => {
     setInputValue(text);
     if (msgImages && msgImages.length > 0) {
-      // Convert stored history images back into local attachments
-      const recoveredAttachments: Attachment[] = msgImages.map(base64 => ({
-        id: Math.random().toString(36).substr(2, 9),
-        type: 'local',
-        content: base64
-      }));
+      const recoveredAttachments: Attachment[] = msgImages.map((src) => {
+        const normalized = isImageRef(src) ? normalizeImageSrc(src) : src;
+        return {
+          id: Math.random().toString(36).substr(2, 9),
+          type: isDataUrl(normalized) ? 'local' : 'url',
+          content: normalized
+        };
+      });
       setAttachments(recoveredAttachments);
     }
     textareaRef.current?.focus();
   };
 
-  const handleAddToReference = (base64: string) => {
-    // 检查图片是否已存在
-    if (isImageAlreadyAttached(base64)) {
-      // 图片已存在，不重复添加
+  const handleAddToReference = (src: string) => {
+    if (isImageAlreadyAttached(src)) {
       return;
     }
+
+    const normalized = isImageRef(src) ? normalizeImageSrc(src) : src;
     setAttachments(prev => [...prev, {
       id: Math.random().toString(36).substr(2, 9),
-      type: 'local',
-      content: base64
+      type: isDataUrl(normalized) ? 'local' : 'url',
+      content: normalized
     }]);
   };
 
@@ -521,7 +560,7 @@ const Sidebar: React.FC<SidebarProps> = ({
     
     setIsEnhancing(true);
     try {
-      const currentBase64s = resolvedAttachments.map(a => a.src);
+      const currentBase64s = await resolveAttachmentDataUrls();
       // 使用可取消的增强方法
       const enhanceRequest = enhancePromptCancellable(inputValue, currentBase64s);
       setCurrentEnhanceRequest(enhanceRequest);
@@ -614,10 +653,16 @@ const Sidebar: React.FC<SidebarProps> = ({
       if (isRequestActive) return;
 
       const currentInput = inputValue;
+      let currentBase64s: string[] = [];
+      try {
+        // Resolve current attachments to base64 strings for the API
+        currentBase64s = await resolveAttachmentDataUrls();
+      } catch (error) {
+        console.error('Failed to resolve attachments:', error);
+        addMessage('model', '附件读取失败，请重试', 'error');
+        return;
+      }
       setInputValue('');
-      
-      // Resolve current attachments to base64 strings for the API
-      const currentBase64s = resolvedAttachments.map(a => a.src);
 
       // 1. Add User Message
       addMessage('user', currentInput, 'text', currentBase64s);
@@ -858,7 +903,7 @@ const Sidebar: React.FC<SidebarProps> = ({
                       <div className="flex flex-wrap gap-3 mb-3 mt-1">
                         {msg.images.map((src, idx) => (
                           <div key={idx} className="relative group/image w-full aspect-square max-w-[280px] rounded-xl overflow-hidden border border-white/10 bg-black/30 shadow-lg">
-                            <img src={src} className="w-full h-full object-contain" alt="result" />
+                            <img src={normalizeAttachmentSrc(src)} className="w-full h-full object-contain" alt="result" />
                             
                              {/* Image Overlay Actions */}
                              <div className="absolute inset-0 bg-black/50 opacity-0 group-hover/image:opacity-100 transition-all duration-200 flex flex-col items-center justify-center gap-3 backdrop-blur-[2px]">

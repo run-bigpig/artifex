@@ -1,6 +1,6 @@
 export interface CanvasImage {
   id: string;
-  src: string; // Base64 data URL
+  src: string; // data URL or image ref URL
   x: number;
   y: number;
   width: number;
@@ -16,7 +16,7 @@ export interface ChatMessage {
   role: 'user' | 'model';
   type?: MessageType;
   text: string;
-  images?: string[]; // Array of base64 strings to display thumbnails
+  images?: string[]; // data URLs or image ref URLs
   timestamp: number;
 }
 
@@ -35,8 +35,8 @@ export interface Viewport {
 
 export interface Attachment {
   id: string;
-  type: 'canvas' | 'local';
-  content: string; // For 'canvas', this is the imageId. For 'local', this is the Base64 string.
+  type: 'canvas' | 'local' | 'url';
+  content: string; // canvas: imageId, local: data URL, url: image ref URL
 }
 
 export type AspectRatio = "1:1" | "16:9" | "9:16" | "4:3" | "3:4";

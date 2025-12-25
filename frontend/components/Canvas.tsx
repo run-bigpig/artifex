@@ -4,6 +4,7 @@ import { Move, ZoomIn, ZoomOut, Trash2, Edit, Upload, Copy, Check, MousePointer2
 import { ExportImage } from '../wailsjs/go/core/App';
 import { v4 as uuidv4 } from 'uuid';
 import { ImageIndex } from '../utils/imageIndex'; 
+import { isDataUrl, isImageRef, normalizeImageSrc } from '../utils/imageSource';
 import {
   getPngBlob,
   createDragPreviewThumbnailSync,
@@ -782,8 +783,11 @@ const Canvas: React.FC<CanvasProps> = ({
     }
     
     // 将图片数据存储到 dataTransfer
+    const dragSrc = normalizeImageSrc(img.src);
     e.dataTransfer.setData('application/canvas-image', img.id);
-    e.dataTransfer.setData('text/plain', img.src); // 备用：直接存储 base64
+    if (isDataUrl(dragSrc) || isImageRef(dragSrc)) {
+      e.dataTransfer.setData('text/plain', dragSrc);
+    }
     e.dataTransfer.effectAllowed = 'copy';
     setIsDraggingToSidebar(true);
     

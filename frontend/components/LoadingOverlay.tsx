@@ -10,15 +10,16 @@ interface LoadingOverlayProps {
 }
 
 const LoadingOverlay: React.FC<LoadingOverlayProps> = ({ isLoading, progress }) => {
-  const [isVisible, setIsVisible] = useState(false);
-  const [shouldRender, setShouldRender] = useState(false);
+  const [isVisible, setIsVisible] = useState(isLoading);
+  const [shouldRender, setShouldRender] = useState(isLoading);
 
   // 控制显示和隐藏动画
   useEffect(() => {
     if (isLoading) {
       setShouldRender(true);
       // 短暂延迟后显示，确保 DOM 已渲染
-      setTimeout(() => setIsVisible(true), 10);
+      const rafId = requestAnimationFrame(() => setIsVisible(true));
+      return () => cancelAnimationFrame(rafId);
     } else {
       setIsVisible(false);
       // 等待动画完成后移除 DOM

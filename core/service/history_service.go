@@ -90,6 +90,11 @@ func (h *HistoryService) Startup(ctx context.Context) error {
 		fmt.Printf("[HistoryService] Warning: failed to migrate old format: %v\n", err)
 		// 不阻塞启动，继续使用新格式
 	}
+	// Normalize history images (convert base64 to refs)
+	if err := h.normalizeHistoryImages(); err != nil {
+		fmt.Printf("[HistoryService] Warning: failed to normalize history images: %v\n", err)
+	}
+
 
 	// ✅ 启动保存队列处理器（只启动一次）
 	h.saveQueueOnce.Do(func() {
@@ -356,18 +361,32 @@ func (h *HistoryService) saveChatHistorySync(chatHistoryJSON string) error {
 
 	// ✅ 性能优化：提取图片数据并分离存储
 	for i := range messages {
-		if len(messages[i].Images) > 0 {
-			// 保存图片并获取引用
-			imageRefs, err := h.imageStorage.SaveImages(messages[i].Images)
-			if err != nil {
-				return fmt.Errorf("failed to save images for message %s: %w", messages[i].ID, err)
-			}
-			// 将 base64 data URL 替换为图片引用
-			messages[i].Images = imageRefs
+		if len(messages[i].Images) == 0 {
+			continue
 		}
-	}
 
-	// 创建历史记录结构
+		refs := make([]string, 0, len(messages[i].Images))
+		for _, img := range messages[i].Images {
+			if img == "" {
+				refs = append(refs, "")
+				continue
+			}
+			if strings.HasPrefix(img, "/images/") {
+				refs = append(refs, strings.TrimPrefix(img, "/"))
+				continue
+			}
+			if strings.HasPrefix(img, "images/") {
+				refs = append(refs, img)
+				continue
+			}
+			ref, err := h.imageStorage.SaveImage(img)
+			if err != nil {
+				return fmt.Errorf("failed to save image for message %s: %w", messages[i].ID, err)
+			}
+			refs = append(refs, ref)
+		}
+		messages[i].Images = refs
+	}
 	history := ChatHistory{
 		Version:   "2.0", // 版本号升级，表示使用新格式
 		UpdatedAt: time.Now().Unix(),
@@ -412,18 +431,22 @@ func (h *HistoryService) saveCanvasHistorySync(canvasHistoryJSON string) error {
 
 	// ✅ 性能优化：提取图片数据并分离存储
 	for i := range canvasData.Images {
-		if canvasData.Images[i].Src != "" {
-			// 保存图片并获取引用
-			imageRef, err := h.imageStorage.SaveImage(canvasData.Images[i].Src)
-			if err != nil {
-				return fmt.Errorf("failed to save image %s: %w", canvasData.Images[i].ID, err)
-			}
-			// 将 base64 data URL 替换为图片引用
-			canvasData.Images[i].Src = imageRef
+		if canvasData.Images[i].Src == "" {
+			continue
 		}
+		if strings.HasPrefix(canvasData.Images[i].Src, "/images/") {
+			canvasData.Images[i].Src = strings.TrimPrefix(canvasData.Images[i].Src, "/")
+			continue
+		}
+		if strings.HasPrefix(canvasData.Images[i].Src, "images/") {
+			continue
+		}
+		imageRef, err := h.imageStorage.SaveImage(canvasData.Images[i].Src)
+		if err != nil {
+			return fmt.Errorf("failed to save image %s: %w", canvasData.Images[i].ID, err)
+		}
+		canvasData.Images[i].Src = imageRef
 	}
-
-	// 创建历史记录结构
 	history := CanvasHistory{
 		Version:   "2.0", // 版本号升级，表示使用新格式
 		UpdatedAt: time.Now().Unix(),
@@ -485,7 +508,7 @@ type ChatRecord struct {
 	Role      string   `json:"role"` // "user" 或 "model"
 	Type      string   `json:"type"` // "text", "system", "error"
 	Text      string   `json:"text"`
-	Images    []string `json:"images,omitempty"` // 图片引用（格式：images/{hash}.{ext}）或 base64 data URL（旧格式兼容）
+	Images    []string `json:"images,omitempty"` // image refs (images/{hash}.{ext})
 	Timestamp int64    `json:"timestamp"`
 }
 
@@ -518,26 +541,28 @@ func (h *HistoryService) LoadChatHistory() (string, error) {
 		return string(data), nil
 	}
 
-	// ✅ 性能优化：加载图片引用并还原为 data URL
+	// image refs only
 	for i := range history.Messages {
-		if len(history.Messages[i].Images) > 0 {
-			// 检查是否是图片引用（新格式）还是 base64 data URL（旧格式）
-			if len(history.Messages[i].Images) > 0 && strings.HasPrefix(history.Messages[i].Images[0], "images/") {
-				// 新格式：加载图片引用
-				dataURLs, err := h.imageStorage.LoadImages(history.Messages[i].Images)
-				if err != nil {
-					fmt.Printf("[HistoryService] Warning: failed to load images for message %s: %v\n", history.Messages[i].ID, err)
-					// 继续处理，使用空数组
-					history.Messages[i].Images = []string{}
-				} else {
-					history.Messages[i].Images = dataURLs
-				}
-			}
-			// 旧格式：已经是 base64 data URL，直接使用
+		if len(history.Messages[i].Images) == 0 {
+			continue
 		}
-	}
 
-	// 返回消息数组
+		filtered := history.Messages[i].Images[:0]
+		for _, ref := range history.Messages[i].Images {
+			if strings.HasPrefix(ref, "/images/") {
+				filtered = append(filtered, strings.TrimPrefix(ref, "/"))
+				continue
+			}
+			if strings.HasPrefix(ref, "images/") {
+				filtered = append(filtered, ref)
+				continue
+			}
+			if ref != "" {
+				fmt.Printf("[HistoryService] Warning: drop non-image reference for message %s\n", history.Messages[i].ID)
+			}
+		}
+		history.Messages[i].Images = filtered
+	}
 	messagesJSON, err := json.Marshal(history.Messages)
 	if err != nil {
 		return "", fmt.Errorf("failed to serialize messages: %w", err)
@@ -579,7 +604,7 @@ type ViewportRecord struct {
 // ImageRecord 图像记录
 type ImageRecord struct {
 	ID       string  `json:"id"`
-	Src      string  `json:"src"` // 图片引用（格式：images/{hash}.{ext}）或 base64 data URL（旧格式兼容）
+	Src      string  `json:"src"` // image refs (images/{hash}.{ext})
 	X        float64 `json:"x"`
 	Y        float64 `json:"y"`
 	Width    float64 `json:"width"`
@@ -626,23 +651,20 @@ func (h *HistoryService) LoadCanvasHistory() (string, error) {
 		return string(data), nil
 	}
 
-	// ✅ 性能优化：加载图片引用并还原为 data URL
+	// image refs only
 	for i := range history.Images {
-		if history.Images[i].Src != "" && strings.HasPrefix(history.Images[i].Src, "images/") {
-			// 新格式：加载图片引用
-			dataURL, err := h.imageStorage.LoadImage(history.Images[i].Src)
-			if err != nil {
-				fmt.Printf("[HistoryService] Warning: failed to load image %s: %v\n", history.Images[i].ID, err)
-				// 继续处理，使用空字符串
-				history.Images[i].Src = ""
-			} else {
-				history.Images[i].Src = dataURL
-			}
+		if history.Images[i].Src == "" {
+			continue
 		}
-		// 旧格式：已经是 base64 data URL，直接使用
+		if strings.HasPrefix(history.Images[i].Src, "/images/") {
+			history.Images[i].Src = strings.TrimPrefix(history.Images[i].Src, "/")
+			continue
+		}
+		if !strings.HasPrefix(history.Images[i].Src, "images/") {
+			fmt.Printf("[HistoryService] Warning: drop non-image reference for image %s\n", history.Images[i].ID)
+			history.Images[i].Src = ""
+		}
 	}
-
-	// 构建返回数据
 	result := struct {
 		Viewport ViewportRecord `json:"viewport"`
 		Images   []ImageRecord  `json:"images"`
@@ -774,4 +796,140 @@ func (h *HistoryService) migrateOldFormat() error {
 	}
 
 	return nil
+}
+
+
+// normalizeHistoryImages 将历史中的 base64 图片转换为图片引用（不保留兼容）
+func (h *HistoryService) normalizeHistoryImages() error {
+	if err := h.normalizeChatHistoryImages(); err != nil {
+		return err
+	}
+	if err := h.normalizeCanvasHistoryImages(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (h *HistoryService) normalizeChatHistoryImages() error {
+	if _, err := os.Stat(h.chatFile); err != nil {
+		return nil
+	}
+
+	data, err := os.ReadFile(h.chatFile)
+	if err != nil {
+		return fmt.Errorf("failed to read chat history file: %w", err)
+	}
+
+	var messages []ChatRecord
+	var history ChatHistory
+	if err := json.Unmarshal(data, &history); err == nil {
+		messages = history.Messages
+	} else if err := json.Unmarshal(data, &messages); err != nil {
+		return nil
+	}
+
+	for i := range messages {
+		filtered := messages[i].Images[:0]
+		for _, img := range messages[i].Images {
+			if img == "" {
+				continue
+			}
+			if strings.HasPrefix(img, "data:") || strings.HasPrefix(img, "images/") || strings.HasPrefix(img, "/images/") {
+				filtered = append(filtered, img)
+				continue
+			}
+			fmt.Printf("[HistoryService] Warning: drop unsupported image for message %s\n", messages[i].ID)
+		}
+		messages[i].Images = filtered
+	}
+
+	if !needsChatImageNormalization(messages) {
+		return nil
+	}
+
+	messagesJSON, _ := json.Marshal(messages)
+	if err := h.saveChatHistorySync(string(messagesJSON)); err != nil {
+		return fmt.Errorf("failed to normalize chat history images: %w", err)
+	}
+
+	return nil
+}
+
+func (h *HistoryService) normalizeCanvasHistoryImages() error {
+	if _, err := os.Stat(h.canvasFile); err != nil {
+		return nil
+	}
+
+	data, err := os.ReadFile(h.canvasFile)
+	if err != nil {
+		return fmt.Errorf("failed to read canvas history file: %w", err)
+	}
+
+	var canvasData struct {
+		Viewport ViewportRecord `json:"viewport"`
+		Images   []ImageRecord  `json:"images"`
+	}
+	var history CanvasHistory
+	if err := json.Unmarshal(data, &history); err == nil {
+		canvasData.Viewport = history.Viewport
+		canvasData.Images = history.Images
+	} else if err := json.Unmarshal(data, &canvasData); err != nil {
+		return nil
+	}
+
+	for i := range canvasData.Images {
+		if canvasData.Images[i].Src == "" {
+			continue
+		}
+		if strings.HasPrefix(canvasData.Images[i].Src, "data:") || strings.HasPrefix(canvasData.Images[i].Src, "images/") || strings.HasPrefix(canvasData.Images[i].Src, "/images/") {
+			continue
+		}
+		fmt.Printf("[HistoryService] Warning: drop unsupported image for image %s\n", canvasData.Images[i].ID)
+		canvasData.Images[i].Src = ""
+	}
+
+	if !needsCanvasImageNormalization(canvasData.Images) {
+		return nil
+	}
+
+	canvasJSON, _ := json.Marshal(canvasData)
+	if err := h.saveCanvasHistorySync(string(canvasJSON)); err != nil {
+		return fmt.Errorf("failed to normalize canvas history images: %w", err)
+	}
+
+	return nil
+}
+
+func needsChatImageNormalization(messages []ChatRecord) bool {
+	for _, msg := range messages {
+		for _, img := range msg.Images {
+			if img == "" {
+				continue
+			}
+			if strings.HasPrefix(img, "images/") {
+				continue
+			}
+			if strings.HasPrefix(img, "/images/") {
+				return true
+			}
+			return true
+		}
+	}
+	return false
+}
+
+func needsCanvasImageNormalization(images []ImageRecord) bool {
+	for _, img := range images {
+		if img.Src == "" {
+			continue
+		}
+		if strings.HasPrefix(img.Src, "images/") {
+			continue
+		}
+		if strings.HasPrefix(img.Src, "/images/") {
+			return true
+		}
+		return true
+	}
+	return false
 }

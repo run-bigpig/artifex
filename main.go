@@ -25,7 +25,8 @@ func main() {
 		MinWidth:  1280,
 		MinHeight: 800,
 		AssetServer: &assetserver.Options{
-			Assets: assets,
+			Assets:  assets,
+			Handler: newImageAssetHandler(),
 		},
 		// 深色背景，与前端 tech-900 (#0B0E14) 匹配
 		BackgroundColour: &options.RGBA{R: 11, G: 14, B: 20, A: 255},

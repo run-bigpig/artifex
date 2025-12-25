@@ -21,6 +21,7 @@ import { ChatMessage } from '../types';
 import { CanvasImage, Viewport } from '../types';
 import { serializationWorker } from './serializationWorker';
 import { activityDebounce } from '../utils/activityDebounce';
+import { normalizeImageSrc } from '../utils/imageSource';
 
 // 保存上次的数据快照，用于检测数据是否发生变化
 let lastChatHistorySnapshot: string | null = null;
@@ -165,7 +166,10 @@ export const loadCanvasHistory = async (): Promise<{ viewport: Viewport; images:
     const data = JSON.parse(historyJSON);
     const result = {
       viewport: data.viewport || { x: 0, y: 0, zoom: 1 },
-      images: data.images || []
+      images: (data.images || []).map((img: CanvasImage) => ({
+        ...img,
+        src: normalizeImageSrc(img.src)
+      }))
     };
     // 初始化快照，避免首次保存时误判为无变化
     lastCanvasHistorySnapshot = historyJSON;
