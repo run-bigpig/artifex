@@ -75,13 +75,13 @@ const Sidebar: React.FC<SidebarProps> = ({
   const currentLoadingIdRef = useRef<string | null>(null); // 当前加载消息的 ID
   
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const scrollRafRef = useRef<number | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const resPickerRef = useRef<HTMLDivElement>(null);
   const isInitialLoadRef = useRef(true);
   const prevAttachmentsLengthRef = useRef<number>(0);
   const prevMessagesRef = useRef<ChatMessage[] | null>(null);
-  const prevMessagesCountRef = useRef<number>(0); // 跟踪上一次的消息数量，用于检测新消息
   
   // ✅ 添加加载标志，防止重复加载
   const isLoadingHistoryRef = useRef(false);
@@ -169,8 +169,6 @@ const Sidebar: React.FC<SidebarProps> = ({
           ...msg,
           images: msg.images ? [...msg.images] : undefined
         }));
-        // 初始化消息数量记录
-        prevMessagesCountRef.current = finalMessages.length;
       } catch (error) {
         console.error('Failed to load chat history:', error);
         // 加载失败时显示欢迎消息
@@ -189,8 +187,6 @@ const Sidebar: React.FC<SidebarProps> = ({
           ...msg,
           images: msg.images ? [...msg.images] : undefined
         }));
-        // 初始化消息数量记录
-        prevMessagesCountRef.current = welcomeMessage.length;
       } finally {
         isInitialLoadRef.current = false;
         isLoadingHistoryRef.current = false;
@@ -272,23 +268,38 @@ const Sidebar: React.FC<SidebarProps> = ({
     node.scrollIntoView({ behavior, block: 'end' });
   }, []);
 
-  // Auto-scroll: 只在有新消息出现时自动滚动
+  const scheduleScrollToBottom = useCallback((behavior: ScrollBehavior = 'auto') => {
+    if (isAutoScrollPaused) {
+      return;
+    }
+    if (scrollRafRef.current !== null) {
+      cancelAnimationFrame(scrollRafRef.current);
+    }
+    scrollRafRef.current = requestAnimationFrame(() => {
+      scrollRafRef.current = null;
+      scrollToBottom(behavior);
+    });
+  }, [isAutoScrollPaused, scrollToBottom]);
+
+  const handleMessageMediaLoad = useCallback(() => {
+    scheduleScrollToBottom('auto');
+  }, [scheduleScrollToBottom]);
+
+  // Auto-scroll
   useEffect(() => {
     if (isAutoScrollPaused) {
       return;
     }
-    // 检查是否有新消息（消息数量增加）
-    const currentCount = messages.length;
-    const prevCount = prevMessagesCountRef.current;
-    
-    // 只有当消息数量增加时才滚动（有新消息）
-    if (currentCount > prevCount) {
-      scrollToBottom('smooth');
-    }
-    
-    // 更新消息数量记录
-    prevMessagesCountRef.current = currentCount;
+    scrollToBottom('smooth');
   }, [messages, isAutoScrollPaused, scrollToBottom]);
+
+  useEffect(() => {
+    return () => {
+      if (scrollRafRef.current !== null) {
+        cancelAnimationFrame(scrollRafRef.current);
+      }
+    };
+  }, []);
 
   // ✅ 应用关闭时保存聊天历史记录（后备方案，用于异常退出）
   // 使用传入的 messagesRef 或创建本地 ref
@@ -885,8 +896,6 @@ const Sidebar: React.FC<SidebarProps> = ({
               images: undefined
             }
           ];
-          // 重置消息数量记录
-          prevMessagesCountRef.current = 1;
         } catch (error) {
           console.error('Failed to clear chat history:', error);
           // 显示错误提示
@@ -993,7 +1002,13 @@ const Sidebar: React.FC<SidebarProps> = ({
                       <div className="flex flex-wrap gap-3 mb-3 mt-1">
                         {msg.images.map((src, idx) => (
                           <div key={idx} className="relative group/image w-full aspect-square max-w-[280px] rounded-xl overflow-hidden border border-white/10 bg-black/30 shadow-lg">
-                            <img src={normalizeAttachmentSrc(src)} className="w-full h-full object-contain" alt="result" />
+                            <img
+                              src={normalizeAttachmentSrc(src)}
+                              className="w-full h-full object-contain"
+                              alt="result"
+                              onLoad={handleMessageMediaLoad}
+                              onError={handleMessageMediaLoad}
+                            />
                             
                              {/* Image Overlay Actions */}
                              <div className="absolute inset-0 bg-black/50 opacity-0 group-hover/image:opacity-100 transition-all duration-200 flex flex-col items-center justify-center gap-3 backdrop-blur-[2px]">
