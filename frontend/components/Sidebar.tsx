@@ -1,5 +1,5 @@
-import React, { useState, useRef, useEffect, useMemo } from 'react';
-import { ChatMessage, CanvasImage, Attachment, ModelSettings, AspectRatio, ImageSize } from '../types';
+import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
+import { ChatMessage, CanvasImage, Attachment, ModelSettings, AspectRatio, ImageSize, MessageType } from '../types';
 import { Send, Bot, Sparkles, X, Paperclip, Edit2, Wand2, Loader2, Monitor, Square, RectangleHorizontal, RectangleVertical, Image, Trash2, Square as StopIcon } from 'lucide-react';
 import { 
   enhancePrompt, 
@@ -66,6 +66,7 @@ const Sidebar: React.FC<SidebarProps> = ({
   const [isDragging, setIsDragging] = useState(false);
   const [isEnhancing, setIsEnhancing] = useState(false);
   const [showResPicker, setShowResPicker] = useState(false);
+  const [isAutoScrollPaused, setIsAutoScrollPaused] = useState(false);
   
   // 请求状态管理
   const [currentRequest, setCurrentRequest] = useState<CancellableRequest<string> | null>(null);
@@ -80,6 +81,7 @@ const Sidebar: React.FC<SidebarProps> = ({
   const isInitialLoadRef = useRef(true);
   const prevAttachmentsLengthRef = useRef<number>(0);
   const prevMessagesRef = useRef<ChatMessage[] | null>(null);
+  const prevMessagesCountRef = useRef<number>(0); // 跟踪上一次的消息数量，用于检测新消息
   
   // ✅ 添加加载标志，防止重复加载
   const isLoadingHistoryRef = useRef(false);
@@ -112,14 +114,14 @@ const Sidebar: React.FC<SidebarProps> = ({
     onChatHistoryLoadedRef.current = onChatHistoryLoaded;
   }, [onChatHistoryLoaded]);
 
-  const sanitizeInterruptedMessages = (items: ChatMessage[]) => {
+  const sanitizeInterruptedMessages = (items: ChatMessage[]): { sanitized: ChatMessage[]; hasInterrupted: boolean } => {
     let hasInterrupted = false;
-    const sanitized = items.map((msg) => {
+    const sanitized: ChatMessage[] = items.map((msg) => {
       if (msg.id.startsWith('loading-') && msg.type === 'system') {
         hasInterrupted = true;
         return {
           ...msg,
-          type: 'error',
+          type: 'error' as MessageType,
           text: '生成中断，请重试'
         };
       }
@@ -167,6 +169,8 @@ const Sidebar: React.FC<SidebarProps> = ({
           ...msg,
           images: msg.images ? [...msg.images] : undefined
         }));
+        // 初始化消息数量记录
+        prevMessagesCountRef.current = finalMessages.length;
       } catch (error) {
         console.error('Failed to load chat history:', error);
         // 加载失败时显示欢迎消息
@@ -185,6 +189,8 @@ const Sidebar: React.FC<SidebarProps> = ({
           ...msg,
           images: msg.images ? [...msg.images] : undefined
         }));
+        // 初始化消息数量记录
+        prevMessagesCountRef.current = welcomeMessage.length;
       } finally {
         isInitialLoadRef.current = false;
         isLoadingHistoryRef.current = false;
@@ -258,10 +264,31 @@ const Sidebar: React.FC<SidebarProps> = ({
     }));
   }, [messages]);
 
-  // Auto-scroll
+  const scrollToBottom = useCallback((behavior: ScrollBehavior = 'smooth') => {
+    const node = chatEndRef.current;
+    if (!node) {
+      return;
+    }
+    node.scrollIntoView({ behavior, block: 'end' });
+  }, []);
+
+  // Auto-scroll: 只在有新消息出现时自动滚动
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+    if (isAutoScrollPaused) {
+      return;
+    }
+    // 检查是否有新消息（消息数量增加）
+    const currentCount = messages.length;
+    const prevCount = prevMessagesCountRef.current;
+    
+    // 只有当消息数量增加时才滚动（有新消息）
+    if (currentCount > prevCount) {
+      scrollToBottom('smooth');
+    }
+    
+    // 更新消息数量记录
+    prevMessagesCountRef.current = currentCount;
+  }, [messages, isAutoScrollPaused, scrollToBottom]);
 
   // ✅ 应用关闭时保存聊天历史记录（后备方案，用于异常退出）
   // 使用传入的 messagesRef 或创建本地 ref
@@ -858,6 +885,8 @@ const Sidebar: React.FC<SidebarProps> = ({
               images: undefined
             }
           ];
+          // 重置消息数量记录
+          prevMessagesCountRef.current = 1;
         } catch (error) {
           console.error('Failed to clear chat history:', error);
           // 显示错误提示
@@ -922,7 +951,14 @@ const Sidebar: React.FC<SidebarProps> = ({
           )}
 
           {/* Chat History */}
-          <div className="flex-1 overflow-y-auto px-5 py-6 space-y-6 scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent">
+          <div
+            className="flex-1 overflow-y-auto px-5 py-6 space-y-6 scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent"
+            onMouseEnter={() => setIsAutoScrollPaused(true)}
+            onMouseLeave={() => {
+              setIsAutoScrollPaused(false);
+              scrollToBottom('smooth');
+            }}
+          >
             {messages.map((msg) => (
               <div 
                 key={msg.id} 
