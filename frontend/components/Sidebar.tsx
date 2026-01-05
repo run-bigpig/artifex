@@ -66,7 +66,6 @@ const Sidebar: React.FC<SidebarProps> = ({
   const [isDragging, setIsDragging] = useState(false);
   const [isEnhancing, setIsEnhancing] = useState(false);
   const [showResPicker, setShowResPicker] = useState(false);
-  const [isAutoScrollPaused, setIsAutoScrollPaused] = useState(false);
   
   // 请求状态管理
   const [currentRequest, setCurrentRequest] = useState<CancellableRequest<string> | null>(null);
@@ -82,6 +81,7 @@ const Sidebar: React.FC<SidebarProps> = ({
   const isInitialLoadRef = useRef(true);
   const prevAttachmentsLengthRef = useRef<number>(0);
   const prevMessagesRef = useRef<ChatMessage[] | null>(null);
+  const prevMessagesLengthForScrollRef = useRef<number>(0);
   
   // ✅ 添加加载标志，防止重复加载
   const isLoadingHistoryRef = useRef(false);
@@ -269,9 +269,6 @@ const Sidebar: React.FC<SidebarProps> = ({
   }, []);
 
   const scheduleScrollToBottom = useCallback((behavior: ScrollBehavior = 'auto') => {
-    if (isAutoScrollPaused) {
-      return;
-    }
     if (scrollRafRef.current !== null) {
       cancelAnimationFrame(scrollRafRef.current);
     }
@@ -279,19 +276,31 @@ const Sidebar: React.FC<SidebarProps> = ({
       scrollRafRef.current = null;
       scrollToBottom(behavior);
     });
-  }, [isAutoScrollPaused, scrollToBottom]);
+  }, [scrollToBottom]);
 
   const handleMessageMediaLoad = useCallback(() => {
     scheduleScrollToBottom('auto');
   }, [scheduleScrollToBottom]);
 
-  // Auto-scroll
+  // Auto-scroll: 只在有新消息写入时触发（包括初始加载）
   useEffect(() => {
-    if (isAutoScrollPaused) {
+    // 初始加载时，直接滚动到底部
+    if (isInitialLoadRef.current) {
+      if (messages.length > 0) {
+        scrollToBottom('auto');
+        prevMessagesLengthForScrollRef.current = messages.length;
+      }
       return;
     }
-    scrollToBottom('smooth');
-  }, [messages, isAutoScrollPaused, scrollToBottom]);
+    
+    // 检查是否有新消息（通过比较消息数量）
+    const prevLength = prevMessagesLengthForScrollRef.current;
+    if (messages.length > prevLength) {
+      // 有新消息，触发滚动
+      scrollToBottom('smooth');
+      prevMessagesLengthForScrollRef.current = messages.length;
+    }
+  }, [messages, scrollToBottom]);
 
   useEffect(() => {
     return () => {
@@ -962,11 +971,6 @@ const Sidebar: React.FC<SidebarProps> = ({
           {/* Chat History */}
           <div
             className="flex-1 overflow-y-auto px-5 py-6 space-y-6 scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent"
-            onMouseEnter={() => setIsAutoScrollPaused(true)}
-            onMouseLeave={() => {
-              setIsAutoScrollPaused(false);
-              scrollToBottom('smooth');
-            }}
           >
             {messages.map((msg) => (
               <div 

@@ -1,6 +1,6 @@
 import React, { useRef, useState, useEffect, useCallback, useMemo } from 'react';
 import { CanvasImage, Point, Viewport, CanvasActionType, ExpandOffsets } from '../types';
-import { Move, ZoomIn, ZoomOut, Trash2, Edit, Upload, Copy, Check, MousePointer2, Scissors, Sparkles, Maximize2 } from 'lucide-react';
+import { Move, ZoomIn, ZoomOut, Trash2, Edit, Upload, Copy, Check, MousePointer2, Scissors, Sparkles, Maximize2, Undo2, Redo2 } from 'lucide-react';
 import { ExportImage } from '../wailsjs/go/core/App';
 import { v4 as uuidv4 } from 'uuid';
 import { ImageIndex } from '../utils/imageIndex'; 
@@ -72,6 +72,169 @@ const Canvas: React.FC<CanvasProps> = ({
   
   // ✅ 性能优化：使用 ref 跟踪是否正在拖动，避免 zIndex 更新和拖动冲突
   const isDraggingRef = useRef(false);
+  
+  // 撤销/重做历史记录管理
+  interface HistoryState {
+    images: CanvasImage[];
+    selectedImageId: string | null;
+  }
+  
+  const MAX_HISTORY_SIZE = 10;
+  const historyRef = useRef<HistoryState[]>([]);
+  const historyIndexRef = useRef<number>(-1); // 当前历史记录位置 (-1 表示没有历史记录)
+  
+  // 用于触发重新渲染的状态（用于 UI 显示撤销/重做按钮状态）
+  const [historyState, setHistoryState] = useState({ 
+    canUndo: false, 
+    canRedo: false,
+    undoSteps: 0,
+    redoSteps: 0
+  });
+  
+  // 标记是否正在执行撤销/重做操作（避免在撤销/重做时保存历史记录）
+  const isUndoRedoRef = useRef(false);
+  
+  // 更新历史记录状态（用于 UI）
+  const updateHistoryState = useCallback(() => {
+    setHistoryState({
+      canUndo: historyIndexRef.current > 0,
+      canRedo: historyIndexRef.current < historyRef.current.length - 1,
+      undoSteps: historyIndexRef.current > 0 ? historyIndexRef.current : 0,
+      redoSteps: historyIndexRef.current < historyRef.current.length - 1 
+        ? historyRef.current.length - historyIndexRef.current - 1 
+        : 0
+    });
+  }, []);
+  
+  /**
+   * 保存当前状态到历史记录
+   * @param skipIfSame 如果与当前状态相同则跳过保存（用于避免连续相同状态）
+   */
+  const saveHistory = useCallback((skipIfSame: boolean = false) => {
+    const currentState: HistoryState = {
+      images: JSON.parse(JSON.stringify(images)), // 深拷贝
+      selectedImageId: selectedImageId
+    };
+    
+    // 如果历史记录为空，标记已初始化
+    if (historyRef.current.length === 0) {
+      hasInitializedHistoryRef.current = true;
+    }
+    
+    // 如果 skipIfSame 为 true，检查是否与当前历史记录相同
+    if (skipIfSame && historyIndexRef.current >= 0) {
+      const lastState = historyRef.current[historyIndexRef.current];
+      if (JSON.stringify(lastState) === JSON.stringify(currentState)) {
+        return; // 状态相同，跳过保存
+      }
+    }
+    
+    // 移除当前位置之后的所有历史记录（当执行新操作时）
+    if (historyIndexRef.current < historyRef.current.length - 1) {
+      historyRef.current = historyRef.current.slice(0, historyIndexRef.current + 1);
+    }
+    
+    // 添加新状态
+    historyRef.current.push(currentState);
+    historyIndexRef.current = historyRef.current.length - 1;
+    
+    // 如果超过最大历史记录数，移除最早的记录
+    if (historyRef.current.length > MAX_HISTORY_SIZE) {
+      historyRef.current.shift();
+      historyIndexRef.current = historyRef.current.length - 1;
+    }
+    
+    // 更新 UI 状态
+    updateHistoryState();
+  }, [images, selectedImageId, updateHistoryState]);
+  
+  /**
+   * 撤销操作
+   */
+  const handleUndo = useCallback(() => {
+    if (historyIndexRef.current <= 0) {
+      // 没有可撤销的历史记录
+      return;
+    }
+    
+    // 标记正在执行撤销操作
+    isUndoRedoRef.current = true;
+    
+    // 移动到上一个历史记录
+    historyIndexRef.current--;
+    const previousState = historyRef.current[historyIndexRef.current];
+    
+    // 恢复状态
+    setImages(previousState.images);
+    setSelectedImageId(previousState.selectedImageId);
+    updateHistoryState();
+  }, [setImages, setSelectedImageId, updateHistoryState]);
+  
+  /**
+   * 重做操作
+   */
+  const handleRedo = useCallback(() => {
+    if (historyIndexRef.current >= historyRef.current.length - 1) {
+      // 没有可重做的历史记录
+      return;
+    }
+    
+    // 标记正在执行重做操作
+    isUndoRedoRef.current = true;
+    
+    // 移动到下一个历史记录
+    historyIndexRef.current++;
+    const nextState = historyRef.current[historyIndexRef.current];
+    
+    // 恢复状态
+    setImages(nextState.images);
+    setSelectedImageId(nextState.selectedImageId);
+    updateHistoryState();
+  }, [setImages, setSelectedImageId, updateHistoryState]);
+  
+  // 跟踪上一次的图片数量
+  const prevImagesLengthRef = useRef(images.length);
+  
+  // 初始化历史记录：在第一次有内容时保存初始状态
+  // 不在组件挂载时立即保存，避免保存空状态导致撤销时清空所有内容
+  const hasInitializedHistoryRef = useRef(false);
+  useEffect(() => {
+    // 如果正在执行撤销/重做，不保存历史记录
+    if (isUndoRedoRef.current) {
+      isUndoRedoRef.current = false;
+      prevImagesLengthRef.current = images.length;
+      return;
+    }
+    
+    // 如果历史记录为空且还没有初始化过
+    if (!hasInitializedHistoryRef.current && historyRef.current.length === 0) {
+      // 只有在有图片内容时才保存初始状态，避免保存空状态
+      if (images.length > 0) {
+        hasInitializedHistoryRef.current = true;
+        // 延迟保存，确保状态已完全更新
+        requestAnimationFrame(() => {
+          saveHistory();
+        });
+        prevImagesLengthRef.current = images.length;
+        return;
+      }
+      // 如果没有图片，不保存，等待第一次有内容时再保存
+      return;
+    }
+    
+    // 如果已经初始化过，在图片数量变化时保存历史记录
+    if (hasInitializedHistoryRef.current) {
+      const prevLength = prevImagesLengthRef.current;
+      // 如果图片数量发生变化（增加或减少），保存历史记录
+      if (images.length !== prevLength) {
+        // 延迟保存，确保状态已完全更新
+        requestAnimationFrame(() => {
+          saveHistory(true); // skipIfSame = true，避免保存相同状态
+        });
+      }
+      prevImagesLengthRef.current = images.length;
+    }
+  }, [images.length, images, saveHistory]);
   
   // Dropdown state for the active menu
   const [showExtractMenu, setShowExtractMenu] = useState(false);
@@ -254,6 +417,8 @@ const Canvas: React.FC<CanvasProps> = ({
     for (let i = 0; i < items.length; i++) {
       if (items[i].type.indexOf('image') !== -1) {
         e.preventDefault();
+        // 保存粘贴前的状态
+        saveHistory();
         const file = items[i].getAsFile();
         if (file) {
           // 将 File 转换为 base64 并添加到画布
@@ -269,7 +434,7 @@ const Canvas: React.FC<CanvasProps> = ({
         return;
       }
     }
-  }, [onImportImage]);
+  }, [onImportImage, saveHistory]);
 
   // 在 document 级别监听 paste 事件
   // div 元素的 onPaste 事件可能不会触发，需要在 document 级别监听
@@ -305,6 +470,9 @@ const Canvas: React.FC<CanvasProps> = ({
           e.preventDefault();
           e.stopPropagation();
           
+          // 保存粘贴前的状态
+          saveHistory();
+          
           const file = items[i].getAsFile();
           if (file) {
             // 将 File 转换为 base64 并添加到画布
@@ -330,17 +498,34 @@ const Canvas: React.FC<CanvasProps> = ({
     return () => {
       document.removeEventListener('paste', handleDocumentPaste, true);
   };
-  }, [onImportImage]);
+  }, [onImportImage, saveHistory]);
 
   // --- Keyboard Shortcuts ---
   /**
    * 处理键盘快捷键
-   * 支持删除、复制、粘贴、复制等操作
+   * 支持删除、复制、粘贴、复制、撤销、重做等操作
    */
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    // Undo (Ctrl+Z)
+    if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
+      e.preventDefault();
+      handleUndo();
+      return;
+    }
+
+    // Redo (Ctrl+Y 或 Ctrl+Shift+Z)
+    if (((e.ctrlKey || e.metaKey) && e.key === 'y') || 
+        ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'z')) {
+      e.preventDefault();
+      handleRedo();
+      return;
+    }
+
     // Delete
     if (e.key === 'Delete' || e.key === 'Backspace') {
       if (selectedImageId) {
+        // 保存删除前的状态
+        saveHistory();
         setImages(prev => prev.filter(img => img.id !== selectedImageId));
         setSelectedImageId(null);
       }
@@ -361,6 +546,8 @@ const Canvas: React.FC<CanvasProps> = ({
     if ((e.ctrlKey || e.metaKey) && e.key === 'd') {
       e.preventDefault();
       if (selectedImageId) {
+        // 保存复制前的状态
+        saveHistory();
         const selectedImage = imageIndex.get(selectedImageId);
         if (selectedImage) {
         // ✅ 使用索引获取所有图片来计算 maxZ，避免重复遍历
@@ -381,7 +568,7 @@ const Canvas: React.FC<CanvasProps> = ({
       }
     }
     }
-  }, [selectedImageId, imageIndex, handleCopyImage, setImages, setSelectedImageId]);
+  }, [selectedImageId, imageIndex, handleCopyImage, setImages, setSelectedImageId, handleUndo, handleRedo, saveHistory]);
 
   // --- Wheel Zoom ---
   /**
@@ -652,9 +839,17 @@ const Canvas: React.FC<CanvasProps> = ({
 
   /**
    * 处理鼠标抬起事件
-   * 重置所有拖拽和调整大小状态
+   * 重置所有拖拽和调整大小状态，并保存历史记录
    */
   const handleMouseUp = useCallback(() => {
+    // 如果刚刚完成了移动或调整大小操作，保存历史记录
+    if (isDraggingImage || isResizing) {
+      // 延迟保存，确保状态已更新
+      requestAnimationFrame(() => {
+        saveHistory(true); // skipIfSame = true，避免保存相同状态
+      });
+    }
+    
     // ✅ 性能优化：重置拖动标志，恢复异步 zIndex 更新
     isDraggingRef.current = false;
     setIsDraggingCanvas(false);
@@ -669,7 +864,7 @@ const Canvas: React.FC<CanvasProps> = ({
     if (!altKeyPressedRef.current) {
       setIsDragOutMode(false);
     }
-  }, []);
+  }, [isDraggingImage, isResizing, saveHistory]);
 
   // --- Drag Image to Sidebar ---
   /**
@@ -1319,6 +1514,9 @@ const Canvas: React.FC<CanvasProps> = ({
     
     // 只有真正的文件拖拽才处理上传
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      // 保存拖拽文件前的状态（在开始处理文件前保存一次）
+      saveHistory();
+      
       try {
       const files = Array.from(e.dataTransfer.files);
       const rect = containerRef.current?.getBoundingClientRect();
@@ -1355,7 +1553,7 @@ const Canvas: React.FC<CanvasProps> = ({
         console.error('处理文件拖拽失败:', error);
     }
     }
-  }, [viewport, onImportImage]);
+  }, [viewport, onImportImage, saveHistory]);
 
   // Determine valid selection state for UI
   const primarySelectedId = selectedImageId;
@@ -2012,6 +2210,40 @@ const Canvas: React.FC<CanvasProps> = ({
           {viewport.zoom > 1 ? <ZoomIn size={12} /> : <ZoomOut size={12} />}
           <span>{Math.round(viewport.zoom * 100)}%</span>
         </div>
+      </div>
+      
+      {/* Undo/Redo Controls */}
+      <div className="absolute top-4 left-4 bg-slate-800/90 backdrop-blur border border-slate-700 rounded-lg p-1 flex gap-1 pointer-events-auto">
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            handleUndo();
+          }}
+          disabled={!historyState.canUndo}
+          className={`p-2 rounded transition-colors ${
+            historyState.canUndo
+              ? 'hover:bg-blue-600 text-slate-300 hover:text-white cursor-pointer'
+              : 'text-slate-600 cursor-not-allowed opacity-50'
+          }`}
+          title={`撤销 (Ctrl+Z)${historyState.canUndo ? ` - 可撤销 ${historyState.undoSteps} 步` : ''}`}
+        >
+          <Undo2 size={16} />
+        </button>
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            handleRedo();
+          }}
+          disabled={!historyState.canRedo}
+          className={`p-2 rounded transition-colors ${
+            historyState.canRedo
+              ? 'hover:bg-blue-600 text-slate-300 hover:text-white cursor-pointer'
+              : 'text-slate-600 cursor-not-allowed opacity-50'
+          }`}
+          title={`重做 (Ctrl+Y)${historyState.canRedo ? ` - 可重做 ${historyState.redoSteps} 步` : ''}`}
+        >
+          <Redo2 size={16} />
+        </button>
       </div>
       
       {/* Drop overlay hint */}

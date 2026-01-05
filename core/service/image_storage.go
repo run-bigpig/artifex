@@ -130,7 +130,6 @@ func (s *ImageStorage) SaveImage(dataURL string) (string, error) {
 	return s.saveImageBytes(imageData, mimeType)
 }
 
-
 func (s *ImageStorage) LoadImage(imageRef string) (string, error) {
 	if imageRef == "" {
 		return "", nil
@@ -189,7 +188,6 @@ func (s *ImageStorage) SaveImageFromURL(imageURL string) (string, error) {
 	mimeType := resp.Header.Get("Content-Type")
 	return s.saveImageBytes(imageData, mimeType)
 }
-
 
 func (s *ImageStorage) SaveImages(dataURLs []string) ([]string, error) {
 	if len(dataURLs) == 0 {
@@ -258,7 +256,6 @@ func (s *ImageStorage) GetImagePath(imageRef string) (string, error) {
 	return filepath.Join(s.imagesDir, cleaned), nil
 }
 
-
 func (s *ImageStorage) parseImageRef(imageRef string) string {
 	if strings.HasPrefix(imageRef, "/images/") {
 		return strings.TrimPrefix(imageRef, "/images/")
@@ -325,4 +322,3 @@ func (s *ImageStorage) GetStorageSize() (int64, error) {
 
 	return totalSize, err
 }
-

@@ -28,3 +28,4 @@ dist-ssr
 frontend/wailsjs
 bin/
 AGENTS.md
+.ace-tool/
