@@ -584,13 +584,14 @@ const Sidebar: React.FC<SidebarProps> = ({
 
   const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault();
-    
-    // 检查是否是从画布拖拽的图片
-    const isCanvasImage = e.dataTransfer.types.includes('application/canvas-image') || 
+
+    // 检查是否是从画布拖拽的图片或文件系统
+    const isCanvasImage = e.dataTransfer.types.includes('application/canvas-image') ||
                           e.dataTransfer.types.includes('text/plain');
-    
-    if (isCanvasImage || e.dataTransfer.files.length > 0) {
-    setIsDragging(true);
+    const hasFiles = e.dataTransfer.types.includes('Files');
+
+    if (isCanvasImage || hasFiles) {
+      setIsDragging(true);
       e.dataTransfer.dropEffect = 'copy';
     }
   };
@@ -602,6 +603,19 @@ const Sidebar: React.FC<SidebarProps> = ({
     const currentTarget = e.currentTarget as HTMLElement;
     if (!currentTarget.contains(relatedTarget)) {
     setIsDragging(false);
+    }
+  };
+
+  const handleDragEnter = (e: React.DragEvent) => {
+    e.preventDefault();
+    // 检查是否是从画布拖拽的图片或文件系统
+    const isCanvasImage = e.dataTransfer.types.includes('application/canvas-image') ||
+                          e.dataTransfer.types.includes('text/plain');
+    const hasFiles = e.dataTransfer.types.includes('Files');
+
+    if (isCanvasImage || hasFiles) {
+      setIsDragging(true);
+      e.dataTransfer.dropEffect = 'copy';
     }
   };
 
@@ -1063,7 +1077,11 @@ const Sidebar: React.FC<SidebarProps> = ({
           <div className="p-5 bg-slate-950 border-t border-slate-800 z-20">
             <form onSubmit={handleSubmit} className="relative group/input">
               
-              <div 
+              <div
+                onDrop={handleDrop}
+                onDragOver={handleDragOver}
+                onDragLeave={handleDragLeave}
+                onDragEnter={handleDragEnter}
                 className={`relative rounded-2xl transition-all duration-200 flex flex-col ${
                   isDragging ? 'ring-2 ring-blue-500 bg-slate-800' : 'bg-slate-900 border border-slate-700 hover:border-slate-600 focus-within:border-slate-500 focus-within:ring-1 focus-within:ring-slate-500/50'
                 }`}
@@ -1093,9 +1111,6 @@ const Sidebar: React.FC<SidebarProps> = ({
                   value={inputValue}
                   onChange={(e) => setInputValue(e.target.value)}
                   onPaste={handlePaste}
-                  onDrop={handleDrop}
-                  onDragOver={handleDragOver}
-                  onDragLeave={handleDragLeave}
                   placeholder={
                     resolvedAttachments.length > 0
                       ? "输入提示词..." 

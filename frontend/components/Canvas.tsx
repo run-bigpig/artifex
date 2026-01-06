@@ -1,6 +1,6 @@
 import React, { useRef, useState, useEffect, useCallback, useMemo } from 'react';
 import { CanvasImage, Point, Viewport, CanvasActionType, ExpandOffsets } from '../types';
-import { Move, ZoomIn, ZoomOut, Trash2, Edit, Upload, Copy, Check, MousePointer2, Scissors, Sparkles, Maximize2, Undo2, Redo2 } from 'lucide-react';
+import { Move, ZoomIn, ZoomOut, Trash2, Edit, Upload, Copy, Check, MousePointer2, Scissors, Sparkles, Maximize2 } from 'lucide-react';
 import { ExportImage } from '../wailsjs/go/core/App';
 import { v4 as uuidv4 } from 'uuid';
 import { ImageIndex } from '../utils/imageIndex'; 
@@ -13,6 +13,8 @@ import {
   calculateZoomViewport,
   clamp,
 } from '../utils/canvasUtils';
+import useHistoryManager, { HistoryActionType } from '../hooks/useHistoryManager';
+import HistoryPanel from './HistoryPanel';
 
 /**
  * 生成唯一 ID
@@ -45,12 +47,15 @@ const Canvas: React.FC<CanvasProps> = ({
   onGenerateExpanded
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
-  
+
+  // ✅ 多选状态：使用 Set 管理多个选中的图片 ID
+  const [selectedImageIds, setSelectedImageIds] = useState<Set<string>>(new Set());
+
   // Interaction States
   const [isDraggingCanvas, setIsDraggingCanvas] = useState(false);
   const [isDraggingImage, setIsDraggingImage] = useState(false);
   const [isResizing, setIsResizing] = useState(false);
-  
+
   // Drag Data
   const [dragStart, setDragStart] = useState<Point>({ x: 0, y: 0 });
   const [resizingImageId, setResizingImageId] = useState<string | null>(null);
@@ -58,183 +63,264 @@ const Canvas: React.FC<CanvasProps> = ({
   const [resizeStartDims, setResizeStartDims] = useState<{width: number, height: number} | null>(null);
   const [resizeStartPos, setResizeStartPos] = useState<{x: number, y: number} | null>(null);
   const [originalAspectRatio, setOriginalAspectRatio] = useState<number | null>(null);
-  
+
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
   const [isDraggingToSidebar, setIsDraggingToSidebar] = useState(false);
   const [isDragOutMode, setIsDragOutMode] = useState(false); // 拖出模式标志
+
+    // ✅ 框选状态：Shift + 拖拽框选
+  const [isBoxSelecting, setIsBoxSelecting] = useState(false);
+  const [boxSelectionStart, setBoxSelectionStart] = useState<Point>({ x: 0, y: 0 });
+  const [boxSelectionEnd, setBoxSelectionEnd] = useState<Point>({ x: 0, y: 0 });
+  
+  // ✅ 多选状态标志：记录当前是否处于多选模式
+  // 用于防止在多选后单击其中一个图片时清空其他选中
+  const wasMultiSelectBeforeClickRef = useRef(false);
+
+  // ✅ 鼠标样式状态
+  const [cursorStyle, setCursorStyle] = useState<string>('default');
   
   // 使用 ref 跟踪 Alt 键状态，避免状态更新延迟问题
   const altKeyPressedRef = useRef(false);
-  
+
   // 使用 ref 跟踪 Ctrl 键状态，用于对称扩展功能
   const ctrlKeyPressedRef = useRef(false);
-  
+
   // ✅ 性能优化：使用 ref 跟踪是否正在拖动，避免 zIndex 更新和拖动冲突
   const isDraggingRef = useRef(false);
-  
-  // 撤销/重做历史记录管理
-  interface HistoryState {
-    images: CanvasImage[];
-    selectedImageId: string | null;
-  }
-  
-  const MAX_HISTORY_SIZE = 10;
-  const historyRef = useRef<HistoryState[]>([]);
-  const historyIndexRef = useRef<number>(-1); // 当前历史记录位置 (-1 表示没有历史记录)
-  
-  // 用于触发重新渲染的状态（用于 UI 显示撤销/重做按钮状态）
-  const [historyState, setHistoryState] = useState({ 
-    canUndo: false, 
-    canRedo: false,
-    undoSteps: 0,
-    redoSteps: 0
-  });
-  
-  // 标记是否正在执行撤销/重做操作（避免在撤销/重做时保存历史记录）
-  const isUndoRedoRef = useRef(false);
-  
-  // 更新历史记录状态（用于 UI）
-  const updateHistoryState = useCallback(() => {
-    setHistoryState({
-      canUndo: historyIndexRef.current > 0,
-      canRedo: historyIndexRef.current < historyRef.current.length - 1,
-      undoSteps: historyIndexRef.current > 0 ? historyIndexRef.current : 0,
-      redoSteps: historyIndexRef.current < historyRef.current.length - 1 
-        ? historyRef.current.length - historyIndexRef.current - 1 
-        : 0
-    });
-  }, []);
-  
+
+  // ✅ 标记是否刚刚执行了批量操作（删除/复制/移动等）
+  // 用于避免 useEffect 中重复保存历史记录
+  const isBatchOperationRef = useRef(false);
+
+  // ✅ 多选状态管理工具函数
+
   /**
-   * 保存当前状态到历史记录
-   * @param skipIfSame 如果与当前状态相同则跳过保存（用于避免连续相同状态）
+   * 判断图片是否被选中
    */
-  const saveHistory = useCallback((skipIfSame: boolean = false) => {
-    const currentState: HistoryState = {
-      images: JSON.parse(JSON.stringify(images)), // 深拷贝
-      selectedImageId: selectedImageId
-    };
-    
-    // 如果历史记录为空，标记已初始化
-    if (historyRef.current.length === 0) {
-      hasInitializedHistoryRef.current = true;
-    }
-    
-    // 如果 skipIfSame 为 true，检查是否与当前历史记录相同
-    if (skipIfSame && historyIndexRef.current >= 0) {
-      const lastState = historyRef.current[historyIndexRef.current];
-      if (JSON.stringify(lastState) === JSON.stringify(currentState)) {
-        return; // 状态相同，跳过保存
+  const isImageSelected = useCallback((id: string): boolean => {
+    return selectedImageIds.has(id);
+  }, [selectedImageIds]);
+
+  /**
+   * 判断是否有多个图片被选中
+   */
+  const hasMultipleSelection = selectedImageIds.size > 1;
+
+  /**
+   * 更新选中状态，同时同步更新 selectedImageId
+   * 用于保持向后兼容性
+   */
+  const updateSelectedIds = useCallback((newIds: Set<string>) => {
+    setSelectedImageIds(newIds);
+    // 同步更新 selectedImageId，保持向后兼容
+    setSelectedImageId(newIds.size > 0 ? Array.from(newIds)[0] : null);
+  }, [setSelectedImageId]);
+
+  /**
+   * 添加或移除单个图片的选中状态（用于 Ctrl/Cmd + 点击）
+   */
+  const toggleImageSelection = useCallback((id: string) => {
+    setSelectedImageIds(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(id)) {
+        newSet.delete(id);
+      } else {
+        newSet.add(id);
       }
+      // 同步更新 selectedImageId
+      setSelectedImageId(newSet.size > 0 ? Array.from(newSet)[0] : null);
+      return newSet;
+    });
+  }, [setSelectedImageId]);
+
+  // ✅ 坐标转换工具函数
+
+  /**
+   * 屏幕坐标转世界坐标
+   * @param screenX 屏幕 X 坐标
+   * @param screenY 屏幕 Y 坐标
+   * @returns 世界坐标
+   */
+  const screenToWorld = useCallback((screenX: number, screenY: number): Point => {
+    const containerRect = containerRef.current?.getBoundingClientRect();
+    if (!containerRect) {
+      return { x: 0, y: 0 };
     }
-    
-    // 移除当前位置之后的所有历史记录（当执行新操作时）
-    if (historyIndexRef.current < historyRef.current.length - 1) {
-      historyRef.current = historyRef.current.slice(0, historyIndexRef.current + 1);
-    }
-    
-    // 添加新状态
-    historyRef.current.push(currentState);
-    historyIndexRef.current = historyRef.current.length - 1;
-    
-    // 如果超过最大历史记录数，移除最早的记录
-    if (historyRef.current.length > MAX_HISTORY_SIZE) {
-      historyRef.current.shift();
-      historyIndexRef.current = historyRef.current.length - 1;
-    }
-    
-    // 更新 UI 状态
-    updateHistoryState();
-  }, [images, selectedImageId, updateHistoryState]);
+
+    const containerX = screenX - containerRect.left;
+    const containerY = screenY - containerRect.top;
+
+    return {
+      x: (containerX - viewport.x) / viewport.zoom,
+      y: (containerY - viewport.y) / viewport.zoom
+    };
+  }, [viewport]);
+
+  /**
+   * 获取图片在屏幕坐标的边界
+   * @param image 图片对象
+   * @returns 屏幕坐标边界
+   */
+  const getImageScreenBounds = useCallback((image: CanvasImage) => {
+    const screenX = viewport.x + image.x * viewport.zoom;
+    const screenY = viewport.y + image.y * viewport.zoom;
+
+    return {
+      x: screenX,
+      y: screenY,
+      width: image.width * viewport.zoom,
+      height: image.height * viewport.zoom
+    };
+  }, [viewport]);
+
+  /**
+   * 碰撞检测：检测图片是否与框选矩形相交
+   * @param image 图片对象
+   * @param boxSelection 框选矩形 (世界坐标)
+   * @returns 是否相交
+   */
+  const isImageInBoxSelection = useCallback((
+    image: CanvasImage,
+    boxSelection: { x: number; y: number; width: number; height: number }
+  ): boolean => {
+    // 将图片的世界坐标边界转换为屏幕坐标边界
+    const imgScreenBounds = getImageScreenBounds(image);
+
+    // 将框选矩形的世界坐标转换为屏幕坐标
+    const boxScreenX = viewport.x + boxSelection.x * viewport.zoom;
+    const boxScreenY = viewport.y + boxSelection.y * viewport.zoom;
+    const boxScreenWidth = boxSelection.width * viewport.zoom;
+    const boxScreenHeight = boxSelection.height * viewport.zoom;
+
+    const imgRight = imgScreenBounds.x + imgScreenBounds.width;
+    const imgBottom = imgScreenBounds.y + imgScreenBounds.height;
+    const boxRight = boxScreenX + boxScreenWidth;
+    const boxBottom = boxScreenY + boxScreenHeight;
+
+    // AABB 碰撞检测
+    return (
+      boxScreenX < imgRight &&
+      boxRight > imgScreenBounds.x &&
+      boxScreenY < imgBottom &&
+      boxBottom > imgScreenBounds.y
+    );
+  }, [getImageScreenBounds, viewport]);
   
+  // ============================================================================
+  // 历史记录管理（使用独立 Hook）
+  // ============================================================================
+  
+  const {
+    historyList,
+    currentIndex: historyCurrentIndex,
+    canUndo,
+    canRedo,
+    pushHistory,
+    undo,
+    redo,
+    jumpTo: historyJumpTo,
+    clear: clearHistory,
+    initialize: initializeHistory,
+    isInitialized: isHistoryInitialized,
+  } = useHistoryManager({ maxSize: 50 });
+
+  // 标记是否正在执行撤销/重做操作（避免触发额外的状态更新）
+  const isUndoRedoRef = useRef(false);
+
   /**
    * 撤销操作
    */
   const handleUndo = useCallback(() => {
-    if (historyIndexRef.current <= 0) {
-      // 没有可撤销的历史记录
-      return;
+    const prevState = undo();
+    if (prevState) {
+      isUndoRedoRef.current = true;
+      setImages(prevState);
     }
-    
-    // 标记正在执行撤销操作
-    isUndoRedoRef.current = true;
-    
-    // 移动到上一个历史记录
-    historyIndexRef.current--;
-    const previousState = historyRef.current[historyIndexRef.current];
-    
-    // 恢复状态
-    setImages(previousState.images);
-    setSelectedImageId(previousState.selectedImageId);
-    updateHistoryState();
-  }, [setImages, setSelectedImageId, updateHistoryState]);
-  
+  }, [undo, setImages]);
+
   /**
    * 重做操作
    */
   const handleRedo = useCallback(() => {
-    if (historyIndexRef.current >= historyRef.current.length - 1) {
-      // 没有可重做的历史记录
-      return;
+    const nextState = redo();
+    if (nextState) {
+      isUndoRedoRef.current = true;
+      setImages(nextState);
     }
-    
-    // 标记正在执行重做操作
-    isUndoRedoRef.current = true;
-    
-    // 移动到下一个历史记录
-    historyIndexRef.current++;
-    const nextState = historyRef.current[historyIndexRef.current];
-    
-    // 恢复状态
-    setImages(nextState.images);
-    setSelectedImageId(nextState.selectedImageId);
-    updateHistoryState();
-  }, [setImages, setSelectedImageId, updateHistoryState]);
-  
-  // 跟踪上一次的图片数量
+  }, [redo, setImages]);
+
+  /**
+   * 跳转到指定历史位置
+   */
+  const handleHistoryJumpTo = useCallback((index: number) => {
+    const state = historyJumpTo(index);
+    if (state) {
+      isUndoRedoRef.current = true;
+      setImages(state);
+    }
+  }, [historyJumpTo, setImages]);
+
+  /**
+   * 清空历史记录
+   */
+  const handleClearHistory = useCallback(() => {
+    clearHistory();
+    // 重新初始化为当前状态
+    initializeHistory(images);
+  }, [clearHistory, initializeHistory, images]);
+
+  /**
+   * 记录操作到历史
+   * 传入操作后的新状态
+   */
+  const recordHistory = useCallback((actionType: HistoryActionType, newState: CanvasImage[], detail?: string) => {
+    pushHistory(actionType, newState, detail);
+  }, [pushHistory]);
+
+  // ====== 操作前状态暂存（用于移动/调整大小等需要检测变化的操作）======
+  // 保存操作开始时的图片状态，用于在操作结束时比较是否真的有变化
+  const operationStartStateRef = useRef<CanvasImage[] | null>(null);
+  // 保存操作类型（move/resize）
+  const pendingOperationRef = useRef<{ type: HistoryActionType; detail?: string } | null>(null);
+
+  // 记录上一次的图片数量，用于检测图片添加
   const prevImagesLengthRef = useRef(images.length);
-  
+
   // 初始化历史记录：在第一次有内容时保存初始状态
-  // 不在组件挂载时立即保存，避免保存空状态导致撤销时清空所有内容
-  const hasInitializedHistoryRef = useRef(false);
+  // 同时监听图片添加（粘贴、导入等异步操作）
   useEffect(() => {
-    // 如果正在执行撤销/重做，不保存历史记录
+    // 如果正在执行撤销/重做，跳过
     if (isUndoRedoRef.current) {
       isUndoRedoRef.current = false;
       prevImagesLengthRef.current = images.length;
       return;
     }
     
-    // 如果历史记录为空且还没有初始化过
-    if (!hasInitializedHistoryRef.current && historyRef.current.length === 0) {
-      // 只有在有图片内容时才保存初始状态，避免保存空状态
-      if (images.length > 0) {
-        hasInitializedHistoryRef.current = true;
-        // 延迟保存，确保状态已完全更新
-        requestAnimationFrame(() => {
-          saveHistory();
-        });
-        prevImagesLengthRef.current = images.length;
-        return;
-      }
-      // 如果没有图片，不保存，等待第一次有内容时再保存
+    // 如果是批量操作（删除、复制等已经手动记录的），跳过
+    if (isBatchOperationRef.current) {
+      isBatchOperationRef.current = false;
+      prevImagesLengthRef.current = images.length;
       return;
     }
     
-    // 如果已经初始化过，在图片数量变化时保存历史记录
-    if (hasInitializedHistoryRef.current) {
-      const prevLength = prevImagesLengthRef.current;
-      // 如果图片数量发生变化（增加或减少），保存历史记录
-      if (images.length !== prevLength) {
-        // 延迟保存，确保状态已完全更新
-        requestAnimationFrame(() => {
-          saveHistory(true); // skipIfSame = true，避免保存相同状态
-        });
-      }
+    // 只在第一次有图片内容时初始化历史记录
+    if (!isHistoryInitialized && images.length > 0) {
+      initializeHistory(images);
       prevImagesLengthRef.current = images.length;
+      return;
     }
-  }, [images.length, images, saveHistory]);
+    
+    // 检测图片添加（粘贴、导入等异步操作）
+    if (isHistoryInitialized && images.length > prevImagesLengthRef.current) {
+      const addedCount = images.length - prevImagesLengthRef.current;
+      // 记录添加操作到历史
+      pushHistory('import_image', images, `${addedCount} 个图片`);
+    }
+    
+    prevImagesLengthRef.current = images.length;
+  }, [images, isHistoryInitialized, initializeHistory, pushHistory]);
   
   // Dropdown state for the active menu
   const [showExtractMenu, setShowExtractMenu] = useState(false);
@@ -245,8 +331,9 @@ const Canvas: React.FC<CanvasProps> = ({
   }, [selectedImageId]);
 
   // ✅ 性能优化：提取 zIndex 更新逻辑为独立函数，可在拖动时立即同步调用
-  const updateSelectedImageZIndex = useCallback((targetSelectedId: string | null, sync: boolean = false) => {
-    if (!targetSelectedId) return;
+  // ✅ 支持批量更新多个图片的 zIndex
+  const updateSelectedImageZIndex = useCallback((targetIds: Set<string>, sync: boolean = false) => {
+    if (targetIds.size === 0) return;
 
     const updateZIndex = () => {
       setImages(prev => {
@@ -258,19 +345,25 @@ const Canvas: React.FC<CanvasProps> = ({
           }
         }
 
-        // 检查选中的图片是否需要更新 zIndex
-        const selectedImg = prev.find(img => img.id === targetSelectedId);
-        if (!selectedImg) return prev;
+        // 批量更新选中图片的 zIndex，使它们都在最上层
+        // 使用索引来保持相对顺序
+        const idArray = Array.from(targetIds);
 
-        // 如果已经是最大 zIndex，不需要更新
-        if (selectedImg.zIndex === maxZIndex + 1) return prev;
+        // 检查是否所有选中的图片都已经是最上层
+        const allAtTop = idArray.every((id, index) => {
+          const img = prev.find(i => i.id === id);
+          return img && img.zIndex === maxZIndex + index + 1;
+        });
 
-        // 更新选中图片的 zIndex，使其在最上层
+        if (allAtTop) return prev;
+
+        // 更新所有选中图片的 zIndex
         return prev.map(img => {
-          if (img.id === targetSelectedId) {
+          const index = idArray.indexOf(img.id);
+          if (index !== -1) {
             return {
               ...img,
-              zIndex: maxZIndex + 1
+              zIndex: maxZIndex + index + 1
             };
           }
           return img;
@@ -287,27 +380,33 @@ const Canvas: React.FC<CanvasProps> = ({
     }
   }, []);
 
+  // ✅ 向后兼容的包装函数：支持单个 ID 参数
+  const updateSelectedImageZIndexSingle = useCallback((targetSelectedId: string | null, sync: boolean = false) => {
+    if (!targetSelectedId) return;
+    updateSelectedImageZIndex(new Set([targetSelectedId]), sync);
+  }, [updateSelectedImageZIndex]);
+
   // 当选中图片时，自动将选中的图片提升到最上层
   // ✅ 性能优化：拖动时立即同步更新 zIndex，非拖动时异步更新避免阻塞
   useEffect(() => {
-    if (!selectedImageId) return;
+    if (selectedImageIds.size === 0) return;
 
     // 如果正在拖动，立即同步更新（避免拖动卡顿）
     if (isDraggingRef.current) {
-      updateSelectedImageZIndex(selectedImageId, true);
+      updateSelectedImageZIndex(selectedImageIds, true);
       return;
     }
 
     // 否则使用 requestAnimationFrame 异步更新（避免阻塞主进程）
     const rafId = requestAnimationFrame(() => {
-      updateSelectedImageZIndex(selectedImageId, true);
+      updateSelectedImageZIndex(selectedImageIds, true);
     });
 
     // 清理函数：如果组件卸载或依赖变化，取消待执行的更新
     return () => {
       cancelAnimationFrame(rafId);
     };
-  }, [selectedImageId, updateSelectedImageZIndex]);
+  }, [selectedImageIds, updateSelectedImageZIndex]);
 
   // 扩图模式状态（需要在 useEffect 之前声明）
   const [expandingImageId, setExpandingImageId] = useState<string | null>(null);
@@ -412,13 +511,13 @@ const Canvas: React.FC<CanvasProps> = ({
   const handlePaste = useCallback((e: React.ClipboardEvent) => {
     // 统一使用 ClipboardEvent API，与输入框区域的处理方式完全一致
     const items = e.clipboardData.items;
-    
+
     // 查找图片类型的剪贴板项（与 Sidebar 中的 handlePaste 逻辑完全一致）
     for (let i = 0; i < items.length; i++) {
       if (items[i].type.indexOf('image') !== -1) {
         e.preventDefault();
-        // 保存粘贴前的状态
-        saveHistory();
+        // ✅ 修复：标记批量操作完成，避免 useEffect 重复保存
+        isBatchOperationRef.current = true;
         const file = items[i].getAsFile();
         if (file) {
           // 将 File 转换为 base64 并添加到画布
@@ -434,7 +533,7 @@ const Canvas: React.FC<CanvasProps> = ({
         return;
       }
     }
-  }, [onImportImage, saveHistory]);
+  }, [onImportImage]);
 
   // 在 document 级别监听 paste 事件
   // div 元素的 onPaste 事件可能不会触发，需要在 document 级别监听
@@ -470,8 +569,7 @@ const Canvas: React.FC<CanvasProps> = ({
           e.preventDefault();
           e.stopPropagation();
           
-          // 保存粘贴前的状态
-          saveHistory();
+          // 粘贴操作的历史记录由 useEffect 自动处理（检测图片数量增加）
           
           const file = items[i].getAsFile();
           if (file) {
@@ -498,7 +596,7 @@ const Canvas: React.FC<CanvasProps> = ({
     return () => {
       document.removeEventListener('paste', handleDocumentPaste, true);
   };
-  }, [onImportImage, saveHistory]);
+  }, [onImportImage]);
 
   // --- Keyboard Shortcuts ---
   /**
@@ -506,6 +604,12 @@ const Canvas: React.FC<CanvasProps> = ({
    * 支持删除、复制、粘贴、复制、撤销、重做等操作
    */
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    // Esc: 清空所有选中
+    if (e.key === 'Escape') {
+      updateSelectedIds(new Set());
+      return;
+    }
+
     // Undo (Ctrl+Z)
     if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
       e.preventDefault();
@@ -514,26 +618,39 @@ const Canvas: React.FC<CanvasProps> = ({
     }
 
     // Redo (Ctrl+Y 或 Ctrl+Shift+Z)
-    if (((e.ctrlKey || e.metaKey) && e.key === 'y') || 
+    if (((e.ctrlKey || e.metaKey) && e.key === 'y') ||
         ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'z')) {
       e.preventDefault();
       handleRedo();
       return;
     }
 
-    // Delete
+    // Delete / Backspace: 批量删除所有选中的图片
     if (e.key === 'Delete' || e.key === 'Backspace') {
-      if (selectedImageId) {
-        // 保存删除前的状态
-        saveHistory();
-        setImages(prev => prev.filter(img => img.id !== selectedImageId));
-        setSelectedImageId(null);
+      if (selectedImageIds.size > 0) {
+        const count = selectedImageIds.size;
+        
+        // 计算删除后的新状态
+        const newImages = images.filter(img => !selectedImageIds.has(img.id));
+        
+        // 记录删除操作到历史（传入删除后的新状态）
+        recordHistory(count > 1 ? 'batch_delete' : 'delete_image', newImages, `${count} 个图片`);
+        
+        // 标记批量操作完成，避免 useEffect 重复保存
+        isBatchOperationRef.current = true;
+
+        // 设置删除后的图片
+        setImages(newImages);
+
+        // 清空所有选中
+        updateSelectedIds(new Set());
       }
+      return;
     }
 
-    // Copy (Ctrl+C)
+    // Copy (Ctrl+C) - 单个选中时复制，多选时不复制
     if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
-      if (selectedImageId) {
+      if (selectedImageId && selectedImageIds.size === 1) {
         e.preventDefault();
         handleCopyImage(selectedImageId);
       }
@@ -542,33 +659,42 @@ const Canvas: React.FC<CanvasProps> = ({
     // Paste (Ctrl+V) - 系统剪贴板由 document 级别的监听器处理
     // 这里不需要处理，让 paste 事件正常触发
 
-    // Duplicate (Ctrl+D)
+    // Duplicate (Ctrl+D) - 单个选中时复制，多选时不复制
     if ((e.ctrlKey || e.metaKey) && e.key === 'd') {
       e.preventDefault();
-      if (selectedImageId) {
-        // 保存复制前的状态
-        saveHistory();
+      if (selectedImageId && selectedImageIds.size === 1) {
+        // 标记批量操作完成，避免 useEffect 重复保存
+        isBatchOperationRef.current = true;
+
         const selectedImage = imageIndex.get(selectedImageId);
         if (selectedImage) {
-        // ✅ 使用索引获取所有图片来计算 maxZ，避免重复遍历
-        const allImages = imageIndex.getAll();
-        const maxZ = allImages.length > 0 
-          ? Math.max(...allImages.map(i => i.zIndex), 0)
-          : 0;
-        
+          // 使用索引获取所有图片来计算 maxZ，避免重复遍历
+          const allImages = imageIndex.getAll();
+          const maxZ = allImages.length > 0
+            ? Math.max(...allImages.map(i => i.zIndex), 0)
+            : 0;
+
           const newImage = {
             ...selectedImage,
-          id: generateId(),
+            id: generateId(),
             x: selectedImage.x + 40,
             y: selectedImage.y + 40,
             zIndex: maxZ + 1
           };
-          setImages(prev => [...prev, newImage]);
+          
+          // 计算复制后的新状态
+          const newImages = [...images, newImage];
+          
+          // 记录复制操作到历史（传入复制后的新状态）
+          recordHistory('copy_image', newImages);
+          
+          setImages(newImages);
           setSelectedImageId(newImage.id);
+          updateSelectedIds(new Set([newImage.id]));
+        }
       }
     }
-    }
-  }, [selectedImageId, imageIndex, handleCopyImage, setImages, setSelectedImageId, handleUndo, handleRedo, saveHistory]);
+  }, [selectedImageId, selectedImageIds, imageIndex, handleCopyImage, setImages, handleUndo, handleRedo, recordHistory, updateSelectedIds, images]);
 
   // --- Wheel Zoom ---
   /**
@@ -648,16 +774,39 @@ const Canvas: React.FC<CanvasProps> = ({
         ctrlKeyPressedRef.current = true;
       }
     };
-    
+
     const handleKeyUp = (e: KeyboardEvent) => {
       if (e.key === 'Control' || (!e.ctrlKey && !e.metaKey)) {
         ctrlKeyPressedRef.current = false;
       }
     };
-    
+
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
-    
+
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+    };
+  }, []);
+
+  // ✅ 监听键盘 Shift 键状态，用于更新鼠标样式
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Shift' || e.shiftKey) {
+        setCursorStyle('crosshair');
+      }
+    };
+
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.key === 'Shift' || !e.shiftKey) {
+        setCursorStyle('default');
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
@@ -673,18 +822,54 @@ const Canvas: React.FC<CanvasProps> = ({
     // 2. Image Click
     if (imageId) {
       e.stopPropagation();
-      
+
+      // ✅ 修复：在处理点击之前记录当前多选状态
+      const wasMultiSelectBeforeClick = selectedImageIds.size > 1;
+
+      // ✅ 检测 Ctrl/Cmd 键：多选模式
+      const isMultiSelect = e.ctrlKey || e.metaKey;
+
+      if (isMultiSelect) {
+        // Ctrl/Cmd + 点击：切换选中状态（添加/移除）
+        // 先判断当前状态
+        const willBeSelected = !selectedImageIds.has(imageId);
+
+        // 手动创建新的选中集合
+        const newSelectedIds = new Set(selectedImageIds);
+        if (willBeSelected) {
+          newSelectedIds.add(imageId);
+        } else {
+          newSelectedIds.delete(imageId);
+        }
+
+        // 更新状态
+        updateSelectedIds(newSelectedIds);
+
+        // 如果切换后被选中，准备拖动
+        if (willBeSelected) {
+          // ✅ 性能优化：设置拖动标志
+          isDraggingRef.current = true;
+
+          // 批量提升 zIndex
+          updateSelectedImageZIndex(newSelectedIds, true);
+
+          setIsDraggingImage(true);
+          setDragStart({ x: e.clientX, y: e.clientY });
+        }
+        return;
+      }
+
       // 如果正在扩图模式，阻止图片拖动（但允许选择）
       if (expandingImageId === imageId) {
         // 只允许选择，不允许拖动
         if (selectedImageId !== imageId) {
-          setSelectedImageId(imageId);
+          updateSelectedIds(new Set([imageId]));
         }
         return;
       }
-      
-      const isSelected = selectedImageId === imageId;
-      
+
+      const isSelected = selectedImageIds.has(imageId);
+
       // 检测 Alt 键：如果按住 Alt，启用拖出模式，不进行画布内移动
       // 使用 ref 和事件对象双重检查，确保准确性
       if (e.altKey || altKeyPressedRef.current) {
@@ -695,44 +880,76 @@ const Canvas: React.FC<CanvasProps> = ({
         // 拖出功能将通过 HTML5 drag API 处理
         return;
       }
-      
+
       // 非 Alt 键：正常处理选择和画布内移动
       setIsDragOutMode(false);
       altKeyPressedRef.current = false;
-      
+
       // ✅ 性能优化：在设置选中状态之前就设置拖动标志，并立即同步更新 zIndex
       // 这样当选中状态变化时，zIndex 会立即同步更新，避免拖动时的卡顿
       isDraggingRef.current = true;
-      
-      // 单选逻辑：点击图片就选中它
-        if (!isSelected) {
-        setSelectedImageId(imageId);
+
+      // ✅ 修复：如果点击前处于多选状态且点击的是已选中的图片，则保持多选状态不改变
+      // 这样可以拖拽所有选中的图片
+      if (wasMultiSelectBeforeClick && isSelected) {
+        // 不改变选中状态，只准备拖动
+        // 使用当前的选中集合
+      } else if (!isSelected || selectedImageIds.size !== 1) {
+        // 单选：只选中当前点击的图片
+        updateSelectedIds(new Set([imageId]));
       }
 
-      // ✅ 性能优化：立即同步更新 zIndex，确保拖动开始时 zIndex 已经更新完成
+      // 性能优化：立即同步更新 zIndex，确保拖动开始时 zIndex 已经更新完成
       // 这样拖动操作可以立即开始，不会因为 zIndex 更新延迟而导致卡顿
-      updateSelectedImageZIndex(imageId, true);
+      updateSelectedImageZIndex(selectedImageIds, true);
+
+      // 暂存操作前状态（在 mouseUp 时检查是否真的移动了再记录历史）
+      operationStartStateRef.current = JSON.parse(JSON.stringify(images));
+      const count = selectedImageIds.size;
+      pendingOperationRef.current = {
+        type: count > 1 ? 'batch_move' : 'move_image',
+        detail: count > 1 ? `${count} 个图片` : undefined,
+      };
 
       setIsDraggingImage(true);
       setDragStart({ x: e.clientX, y: e.clientY });
-    } 
+    }
     // 3. Canvas Click
     else {
-      setIsDraggingCanvas(true);
-      setDragStart({ x: e.clientX, y: e.clientY });
-      // Deselect if clicking empty space
-      setSelectedImageId(null);
-      setShowExtractMenu(false);
-      // 退出扩图模式
-      if (expandingImageId) {
-        setExpandingImageId(null);
-        setExpandOffsets({ top: 0, right: 0, bottom: 0, left: 0 });
+      // ✅ 检测 Shift 键：框选模式
+      const isBoxSelectionMode = e.shiftKey;
+
+      if (isBoxSelectionMode) {
+        // Shift + 点击空白处：开始框选
+        setIsBoxSelecting(true);
+        // 记录起始坐标（屏幕坐标）
+        setBoxSelectionStart({ x: e.clientX, y: e.clientY });
+        setBoxSelectionEnd({ x: e.clientX, y: e.clientY });
+        // 清空当前选中（可选，根据用户体验需求）
+        updateSelectedIds(new Set());
+      } else {
+        // 普通点击：拖拽画布
+        setIsDraggingCanvas(true);
+        setDragStart({ x: e.clientX, y: e.clientY });
+        // ✅ 点击空白处：清空所有选中（使用 updateSelectedIds 保持同步）
+        updateSelectedIds(new Set());
+        setShowExtractMenu(false);
+        // 退出扩图模式
+        if (expandingImageId) {
+          setExpandingImageId(null);
+          setExpandOffsets({ top: 0, right: 0, bottom: 0, left: 0 });
+        }
       }
     }
   };
 
   const handleResizeStart = (e: React.MouseEvent, img: CanvasImage, handle: ResizeHandle) => {
     e.stopPropagation();
+    
+    // 暂存操作前状态（在 mouseUp 时检查是否真的调整了再记录历史）
+    operationStartStateRef.current = JSON.parse(JSON.stringify(images));
+    pendingOperationRef.current = { type: 'resize_image' };
+    
     setIsResizing(true);
     setResizingImageId(img.id);
     setResizeHandle(handle);
@@ -748,13 +965,19 @@ const Canvas: React.FC<CanvasProps> = ({
     if (isDragOutMode) {
       return;
     }
-    
+
+    // ✅ 框选模式：实时更新框选矩形
+    if (isBoxSelecting) {
+      setBoxSelectionEnd({ x: e.clientX, y: e.clientY });
+      return;
+    }
+
     const scale = viewport.zoom;
-    
+
     if (isResizing && resizingImageId && resizeStartDims && resizeStartPos && resizeHandle && originalAspectRatio) {
       const dx = (e.clientX - dragStart.x) / scale;
       const dy = (e.clientY - dragStart.y) / scale;
-      
+
       let newX = resizeStartPos.x;
       let newY = resizeStartPos.y;
       let newWidth = resizeStartDims.width;
@@ -764,7 +987,7 @@ const Canvas: React.FC<CanvasProps> = ({
       // 根据拖动的角，计算相对于对角点的偏移量
       let deltaWidth = 0;
       let deltaHeight = 0;
-      
+
       switch (resizeHandle) {
         case 'br': // Bottom Right - 右下角：向右下拖动增加尺寸
           deltaWidth = dx;
@@ -783,16 +1006,16 @@ const Canvas: React.FC<CanvasProps> = ({
           deltaHeight = -dy;
           break;
       }
-      
+
       // 使用较大的变化量来保持宽高比（选择变化更大的方向）
       const scaleFactor = Math.abs(deltaWidth) > Math.abs(deltaHeight * originalAspectRatio)
         ? deltaWidth / resizeStartDims.width
         : deltaHeight / resizeStartDims.height;
-      
+
       // 计算新尺寸（保持宽高比）
       newWidth = Math.max(50, resizeStartDims.width * (1 + scaleFactor));
       newHeight = newWidth / originalAspectRatio;
-      
+
       // 根据拖动的角调整位置，使得对角的点保持固定
       switch (resizeHandle) {
         case 'br': // Bottom Right - 右下角：左上角固定
@@ -810,19 +1033,20 @@ const Canvas: React.FC<CanvasProps> = ({
           break;
       }
 
-      setImages(prev => prev.map(img => 
-        img.id === resizingImageId 
-          ? { ...img, x: newX, y: newY, width: newWidth, height: newHeight } 
+      setImages(prev => prev.map(img =>
+        img.id === resizingImageId
+          ? { ...img, x: newX, y: newY, width: newWidth, height: newHeight }
           : img
       ));
 
-    } else if (isDraggingImage && selectedImageId) {
+    } else if (isDraggingImage && selectedImageIds.size > 0) {
+      // ✅ 批量移动所有选中的图片
       const dx = (e.clientX - dragStart.x) / scale;
       const dy = (e.clientY - dragStart.y) / scale;
-      
-      setImages(prev => prev.map(img => 
-        img.id === selectedImageId
-          ? { ...img, x: img.x + dx, y: img.y + dy } 
+
+      setImages(prev => prev.map(img =>
+        selectedImageIds.has(img.id)
+          ? { ...img, x: img.x + dx, y: img.y + dy }
           : img
       ));
       setDragStart({ x: e.clientX, y: e.clientY });
@@ -842,15 +1066,80 @@ const Canvas: React.FC<CanvasProps> = ({
    * 重置所有拖拽和调整大小状态，并保存历史记录
    */
   const handleMouseUp = useCallback(() => {
-    // 如果刚刚完成了移动或调整大小操作，保存历史记录
-    if (isDraggingImage || isResizing) {
-      // 延迟保存，确保状态已更新
-      requestAnimationFrame(() => {
-        saveHistory(true); // skipIfSame = true，避免保存相同状态
-      });
+    // ✅ 框选完成：计算选中的图片
+    if (isBoxSelecting) {
+      const containerRect = containerRef.current?.getBoundingClientRect();
+      if (containerRect) {
+        // 将屏幕坐标转换为容器坐标
+        const startContainerX = boxSelectionStart.x - containerRect.left;
+        const startContainerY = boxSelectionStart.y - containerRect.top;
+        const endContainerX = boxSelectionEnd.x - containerRect.left;
+        const endContainerY = boxSelectionEnd.y - containerRect.top;
+
+        // 计算框选矩形（容器坐标）
+        const boxX = Math.min(startContainerX, endContainerX);
+        const boxY = Math.min(startContainerY, endContainerY);
+        const boxWidth = Math.abs(endContainerX - startContainerX);
+        const boxHeight = Math.abs(endContainerY - startContainerY);
+
+        // 转换为世界坐标
+        const worldBox = {
+          x: (boxX - viewport.x) / viewport.zoom,
+          y: (boxY - viewport.y) / viewport.zoom,
+          width: boxWidth / viewport.zoom,
+          height: boxHeight / viewport.zoom
+        };
+
+        // 碰撞检测：找出所有与框选矩形相交的图片
+        const selectedIds = new Set<string>();
+        images.forEach(img => {
+          if (isImageInBoxSelection(img, worldBox)) {
+            selectedIds.add(img.id);
+          }
+        });
+
+        // 更新选中状态
+        if (selectedIds.size > 0) {
+          updateSelectedIds(selectedIds);
+          // 提升所有选中图片的 zIndex
+          updateSelectedImageZIndex(selectedIds, true);
+        }
+      }
+
+      // 清空框选状态
+      setIsBoxSelecting(false);
+      setBoxSelectionStart({ x: 0, y: 0 });
+      setBoxSelectionEnd({ x: 0, y: 0 });
+      return;
     }
-    
-    // ✅ 性能优化：重置拖动标志，恢复异步 zIndex 更新
+
+    // 检查是否真的有移动/调整大小操作，只有状态变化了才记录历史
+    if ((isDraggingImage || isResizing) && operationStartStateRef.current && pendingOperationRef.current) {
+      // 比较操作前后的状态是否有变化（只比较位置和尺寸）
+      const startState = operationStartStateRef.current;
+      const hasChanged = images.some((img, index) => {
+        const startImg = startState.find(s => s.id === img.id);
+        if (!startImg) return true; // 新增图片
+        // 检查位置或尺寸是否变化
+        return (
+          Math.abs(img.x - startImg.x) > 0.1 ||
+          Math.abs(img.y - startImg.y) > 0.1 ||
+          Math.abs(img.width - startImg.width) > 0.1 ||
+          Math.abs(img.height - startImg.height) > 0.1
+        );
+      });
+
+      if (hasChanged) {
+        // 状态确实变化了，记录操作后的新状态到历史
+        recordHistory(pendingOperationRef.current.type, images, pendingOperationRef.current.detail);
+      }
+    }
+
+    // 清空暂存的操作状态
+    operationStartStateRef.current = null;
+    pendingOperationRef.current = null;
+
+    // 性能优化：重置拖动标志，恢复异步 zIndex 更新
     isDraggingRef.current = false;
     setIsDraggingCanvas(false);
     setIsDraggingImage(false);
@@ -860,11 +1149,13 @@ const Canvas: React.FC<CanvasProps> = ({
     setResizeStartDims(null);
     setResizeStartPos(null);
     setOriginalAspectRatio(null);
+    // 重置批量操作标志
+    isBatchOperationRef.current = false;
     // 只有在 Alt 键未按下时才重置拖出模式
     if (!altKeyPressedRef.current) {
       setIsDragOutMode(false);
     }
-  }, [isDraggingImage, isResizing, saveHistory]);
+  }, [isBoxSelecting, isDraggingImage, isResizing, boxSelectionStart, boxSelectionEnd, viewport, images, updateSelectedIds, updateSelectedImageZIndex, isImageInBoxSelection, recordHistory]);
 
   // --- Drag Image to Sidebar ---
   /**
@@ -1016,6 +1307,13 @@ const Canvas: React.FC<CanvasProps> = ({
     if (expandingImageId && action !== 'generate_expanded') {
       setExpandingImageId(null);
       setExpandOffsets({ top: 0, right: 0, bottom: 0, left: 0 });
+    }
+    
+    // 记录删除操作到历史（传入删除后的新状态）
+    if (action === 'delete') {
+      const newImages = images.filter(img => img.id !== id);
+      recordHistory('delete_image', newImages);
+      isBatchOperationRef.current = true;
     }
     
     onAction(id, action);
@@ -1514,8 +1812,7 @@ const Canvas: React.FC<CanvasProps> = ({
     
     // 只有真正的文件拖拽才处理上传
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      // 保存拖拽文件前的状态（在开始处理文件前保存一次）
-      saveHistory();
+      // 导入操作的历史记录由 useEffect 自动处理（检测图片数量增加）
       
       try {
       const files = Array.from(e.dataTransfer.files);
@@ -1553,19 +1850,21 @@ const Canvas: React.FC<CanvasProps> = ({
         console.error('处理文件拖拽失败:', error);
     }
     }
-  }, [viewport, onImportImage, saveHistory]);
+  }, [viewport, onImportImage]);
 
   // Determine valid selection state for UI
+  // primarySelectedId 用于显示操作菜单（多选时显示在第一个选中的图片上）
   const primarySelectedId = selectedImageId;
 
   return (
-    <div 
+    <div
       ref={containerRef}
       tabIndex={0} // Make focusable for keyboard events
       onKeyDown={handleKeyDown}
-      className={`relative w-full h-full bg-slate-900 overflow-hidden cursor-default select-none transition-colors duration-200 outline-none ${
+      className={`relative w-full h-full bg-slate-900 overflow-hidden select-none transition-colors duration-200 outline-none ${
         isDragOver ? 'bg-slate-800' : ''
       }`}
+      style={{ cursor: cursorStyle }}
       onMouseDown={(e) => handleMouseDown(e)}
       onMouseMove={handleMouseMove}
       onMouseUp={handleMouseUp}
@@ -1591,9 +1890,46 @@ const Canvas: React.FC<CanvasProps> = ({
         }}
       >
         {images.map((img) => {
-          const isSelected = selectedImageId === img.id;
+          const isSelected = selectedImageIds.has(img.id);
           const showMenu = isSelected && img.id === primarySelectedId;
           const isExpanding = expandingImageId === img.id;
+
+          // ✅ 框选过程中临时高亮检测
+          const isTempHighlighted = (() => {
+            if (!isBoxSelecting) return false;
+
+            const containerRect = containerRef.current?.getBoundingClientRect();
+            if (!containerRect) return false;
+
+            const imgScreenBounds = getImageScreenBounds(img);
+
+            // 计算框选矩形（容器坐标）
+            const startContainerX = boxSelectionStart.x - containerRect.left;
+            const startContainerY = boxSelectionStart.y - containerRect.top;
+            const endContainerX = boxSelectionEnd.x - containerRect.left;
+            const endContainerY = boxSelectionEnd.y - containerRect.top;
+
+            const boxX = Math.min(startContainerX, endContainerX);
+            const boxY = Math.min(startContainerY, endContainerY);
+            const boxWidth = Math.abs(endContainerX - startContainerX);
+            const boxHeight = Math.abs(endContainerY - startContainerY);
+
+            const imgRight = imgScreenBounds.x + imgScreenBounds.width;
+            const imgBottom = imgScreenBounds.y + imgScreenBounds.height;
+            const boxRight = boxX + boxWidth;
+            const boxBottom = boxY + boxHeight;
+
+            // AABB 碰撞检测
+            return (
+              boxX < imgRight &&
+              boxRight > imgScreenBounds.x &&
+              boxY < imgBottom &&
+              boxBottom > imgScreenBounds.y
+            );
+          })();
+
+          // 选中或临时高亮的样式
+          const showSelectionOrHighlight = isSelected || isTempHighlighted;
 
           return (
             <div
@@ -1612,7 +1948,11 @@ const Canvas: React.FC<CanvasProps> = ({
                 width: img.width,
                 height: img.height,
                 zIndex: img.zIndex,
-                boxShadow: isSelected ? '0 0 0 2px #3b82f6, 0 20px 25px -5px rgb(0 0 0 / 0.1)' : 'none',
+                boxShadow: showSelectionOrHighlight
+                  ? isTempHighlighted
+                    ? '0 0 0 2px #22c55e, 0 20px 25px -5px rgb(0 0 0 / 0.1)' // 临时高亮：绿色
+                    : '0 0 0 2px #3b82f6, 0 20px 25px -5px rgb(0 0 0 / 0.1)' // 正常选中：蓝色
+                  : 'none',
                 // 移除容器的旋转，改为只旋转图片元素
               }}
               onMouseDown={(e) => handleMouseDown(e, img.id)}
@@ -1654,7 +1994,7 @@ const Canvas: React.FC<CanvasProps> = ({
 
       {/* Floating UI Elements (不受缩放影响) */}
       {images.map((img) => {
-        const isSelected = selectedImageId === img.id;
+        const isSelected = selectedImageIds.has(img.id);
         const showMenu = isSelected && img.id === primarySelectedId;
         const isExpanding = expandingImageId === img.id;
         
@@ -2211,47 +2551,94 @@ const Canvas: React.FC<CanvasProps> = ({
           <span>{Math.round(viewport.zoom * 100)}%</span>
         </div>
       </div>
+
+      {/* ✅ 选中计数器 */}
+      {selectedImageIds.size > 1 && (
+        <div className="absolute top-4 right-4 bg-slate-800/90 backdrop-blur border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white pointer-events-none select-none">
+          已选中 {selectedImageIds.size} 个图片
+        </div>
+      )}
       
-      {/* Undo/Redo Controls */}
-      <div className="absolute top-4 left-4 bg-slate-800/90 backdrop-blur border border-slate-700 rounded-lg p-1 flex gap-1 pointer-events-auto">
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            handleUndo();
-          }}
-          disabled={!historyState.canUndo}
-          className={`p-2 rounded transition-colors ${
-            historyState.canUndo
-              ? 'hover:bg-blue-600 text-slate-300 hover:text-white cursor-pointer'
-              : 'text-slate-600 cursor-not-allowed opacity-50'
-          }`}
-          title={`撤销 (Ctrl+Z)${historyState.canUndo ? ` - 可撤销 ${historyState.undoSteps} 步` : ''}`}
-        >
-          <Undo2 size={16} />
-        </button>
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            handleRedo();
-          }}
-          disabled={!historyState.canRedo}
-          className={`p-2 rounded transition-colors ${
-            historyState.canRedo
-              ? 'hover:bg-blue-600 text-slate-300 hover:text-white cursor-pointer'
-              : 'text-slate-600 cursor-not-allowed opacity-50'
-          }`}
-          title={`重做 (Ctrl+Y)${historyState.canRedo ? ` - 可重做 ${historyState.redoSteps} 步` : ''}`}
-        >
-          <Redo2 size={16} />
-        </button>
-      </div>
-      
+      {/* 历史记录面板（类 Photoshop 风格） */}
+      <HistoryPanel
+        historyList={historyList}
+        currentIndex={historyCurrentIndex}
+        canUndo={canUndo}
+        canRedo={canRedo}
+        onUndo={handleUndo}
+        onRedo={handleRedo}
+        onJumpTo={handleHistoryJumpTo}
+        onClear={handleClearHistory}
+      />
+
       {/* Drop overlay hint */}
       {isDragOver && (
          <div className="absolute inset-0 flex items-center justify-center bg-blue-500/10 pointer-events-none z-[100] border-4 border-blue-500 border-dashed m-4 rounded-xl">
              <div className="text-blue-200 font-bold text-xl drop-shadow-md">释放图片以添加到画布</div>
          </div>
       )}
+
+      {/* ✅ 框选矩形 */}
+      {isBoxSelecting && (() => {
+        const containerRect = containerRef.current?.getBoundingClientRect();
+        if (!containerRect) return null;
+
+        // 计算框选矩形（容器坐标）
+        const startContainerX = boxSelectionStart.x - containerRect.left;
+        const startContainerY = boxSelectionStart.y - containerRect.top;
+        const endContainerX = boxSelectionEnd.x - containerRect.left;
+        const endContainerY = boxSelectionEnd.y - containerRect.top;
+
+        const boxX = Math.min(startContainerX, endContainerX);
+        const boxY = Math.min(startContainerY, endContainerY);
+        const boxWidth = Math.abs(endContainerX - startContainerX);
+        const boxHeight = Math.abs(endContainerY - startContainerY);
+
+        return (
+          <div
+            className="absolute pointer-events-none z-[90]"
+            style={{
+              left: boxX,
+              top: boxY,
+              width: boxWidth,
+              height: boxHeight,
+              backgroundColor: 'rgba(59, 130, 246, 0.2)',
+              border: '2px dashed #3b82f6'
+            }}
+          />
+        );
+      })()}
+
+      {/* ✅ 框选矩形 */}
+      {isBoxSelecting && (() => {
+        const containerRect = containerRef.current?.getBoundingClientRect();
+        if (!containerRect) return null;
+
+        // 计算框选矩形（容器坐标）
+        const startContainerX = boxSelectionStart.x - containerRect.left;
+        const startContainerY = boxSelectionStart.y - containerRect.top;
+        const endContainerX = boxSelectionEnd.x - containerRect.left;
+        const endContainerY = boxSelectionEnd.y - containerRect.top;
+
+        const boxX = Math.min(startContainerX, endContainerX);
+        const boxY = Math.min(startContainerY, endContainerY);
+        const boxWidth = Math.abs(endContainerX - startContainerX);
+        const boxHeight = Math.abs(endContainerY - startContainerY);
+
+        return (
+          <div
+            className="absolute pointer-events-none z-[90]"
+            style={{
+              left: boxX,
+              top: boxY,
+              width: boxWidth,
+              height: boxHeight,
+              backgroundColor: 'rgba(59, 130, 246, 0.2)',
+              border: '2px dashed #3b82f6'
+            }}
+          />
+        );
+      })()}
     </div>
   );
 };
