@@ -439,8 +439,28 @@ const ExpandMode: React.FC<ExpandModeProps> = ({
   const hasExpansion = expandOffsets.top > 0 || expandOffsets.right > 0 || 
                        expandOffsets.bottom > 0 || expandOffsets.left > 0;
 
+  // 在拖动时停止拖动的处理函数
+  const stopDragging = useCallback(() => {
+    if (isDragging) {
+      setIsDragging(false);
+      setDraggingHandleType(null);
+      setTimeout(() => setSmartGuides([]), GUIDE_FADE_DELAY);
+    }
+  }, [isDragging]);
+
   return (
     <>
+      {/* 拖动时的全屏透明遮罩层 - 确保所有鼠标事件都能被正确捕获 */}
+      {isDragging && (
+        <div
+          className="fixed inset-0 z-[99]"
+          style={{ 
+            cursor: handleConfigs.find(h => h.type === draggingHandleType)?.cursor || 'default'
+          }}
+          onMouseUp={stopDragging}
+        />
+      )}
+
       {/* 扩展区域背景（白色虚线框） */}
       <div
         className="absolute bg-white/80 border-2 border-dashed border-blue-400 pointer-events-none"
@@ -457,7 +477,7 @@ const ExpandMode: React.FC<ExpandModeProps> = ({
       {handleConfigs.map(({ type, position, cursor }) => (
         <div
           key={type}
-          className="absolute w-5 h-5 bg-white border-2 border-blue-500 rounded-full z-50 hover:scale-125 transition-transform pointer-events-auto shadow-lg"
+          className="absolute w-5 h-5 bg-white border-2 border-blue-500 rounded-full z-[100] hover:scale-125 transition-transform pointer-events-auto shadow-lg"
           style={{
             left: position.x - 10,
             top: position.y - 10,
@@ -556,6 +576,14 @@ const ExpandMode: React.FC<ExpandModeProps> = ({
           transform: 'translate(-50%, -50%)',
         }}
         onMouseDown={(e) => e.stopPropagation()}
+        onMouseUp={() => {
+          // 确保在按钮区域释放鼠标时也能清除拖动状态
+          if (isDragging) {
+            setIsDragging(false);
+            setDraggingHandleType(null);
+            setTimeout(() => setSmartGuides([]), GUIDE_FADE_DELAY);
+          }
+        }}
       >
         {/* 取消按钮 */}
         <button

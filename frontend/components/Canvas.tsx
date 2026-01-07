@@ -944,7 +944,12 @@ const Canvas: React.FC<CanvasProps> = ({
     setOriginalAspectRatio(img.width / img.height);
   };
 
-  const handleMouseMove = (e: React.MouseEvent) => {
+  /**
+   * 处理鼠标移动事件
+   * 支持画布拖拽、图片拖拽、调整大小、框选等操作
+   * 使用 useCallback 包装，支持绑定到 document 进行全局监听
+   */
+  const handleMouseMove = useCallback((e: MouseEvent | React.MouseEvent) => {
     // 如果处于拖出模式，不处理画布内移动
     if (isDragOutMode) {
       return;
@@ -1043,13 +1048,14 @@ const Canvas: React.FC<CanvasProps> = ({
       }));
       setDragStart({ x: e.clientX, y: e.clientY });
     }
-  };
+  }, [isDragOutMode, isBoxSelecting, viewport.zoom, isResizing, resizingImageId, resizeStartDims, resizeStartPos, resizeHandle, originalAspectRatio, dragStart, isDraggingImage, selectedImageIds, isDraggingCanvas, setImages, setViewport]);
 
   /**
    * 处理鼠标抬起事件
    * 重置所有拖拽和调整大小状态，并保存历史记录
+   * 支持绑定到 document 进行全局监听，确保快速拖动时不丢失事件
    */
-  const handleMouseUp = useCallback(() => {
+  const handleMouseUp = useCallback((e?: MouseEvent | React.MouseEvent) => {
     // ✅ 框选完成：计算选中的图片
     if (isBoxSelecting) {
       const containerRect = containerRef.current?.getBoundingClientRect();
@@ -1140,6 +1146,35 @@ const Canvas: React.FC<CanvasProps> = ({
       setIsDragOutMode(false);
     }
   }, [isBoxSelecting, isDraggingImage, isResizing, boxSelectionStart, boxSelectionEnd, viewport, images, updateSelectedIds, updateSelectedImageZIndex, isImageInBoxSelection, recordHistory]);
+
+  // ✅ 关键修复：在拖拽状态下，将 mousemove 和 mouseup 事件绑定到 document
+  // 这样即使鼠标快速移动并移出画布边界，事件也能继续捕获，图片可以跟随鼠标
+  useEffect(() => {
+    // 检查是否处于任何拖拽状态
+    const isDragging = isDraggingCanvas || isDraggingImage || isResizing || isBoxSelecting;
+    
+    if (!isDragging) {
+      return; // 不在拖拽状态，不需要绑定
+    }
+
+    // 绑定到 document，确保即使鼠标移出容器也能捕获事件
+    const handleDocumentMouseMove = (e: MouseEvent) => {
+      handleMouseMove(e);
+    };
+
+    const handleDocumentMouseUp = (e: MouseEvent) => {
+      handleMouseUp(e);
+    };
+
+    document.addEventListener('mousemove', handleDocumentMouseMove);
+    document.addEventListener('mouseup', handleDocumentMouseUp);
+
+    // 清理函数：组件卸载或拖拽状态结束时移除监听器
+    return () => {
+      document.removeEventListener('mousemove', handleDocumentMouseMove);
+      document.removeEventListener('mouseup', handleDocumentMouseUp);
+    };
+  }, [isDraggingCanvas, isDraggingImage, isResizing, isBoxSelecting, handleMouseMove, handleMouseUp]);
 
   // --- Drag Image to Sidebar ---
   /**
@@ -1433,9 +1468,8 @@ const Canvas: React.FC<CanvasProps> = ({
       }`}
       style={{ cursor: cursorStyle }}
       onMouseDown={(e) => handleMouseDown(e)}
-      onMouseMove={handleMouseMove}
-      onMouseUp={handleMouseUp}
-      onMouseLeave={handleMouseUp}
+      // ✅ mousemove 和 mouseup 现在由 document 级别的监听器处理
+      // 这确保了即使鼠标快速移动并移出画布边界，事件也能继续捕获
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
