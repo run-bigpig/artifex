@@ -100,51 +100,90 @@ const App: React.FC = () => {
     return { width: canvasWidth, height: canvasHeight };
   };
 
-  // Helper to calculate center of the visible canvas area
+  /**
+   * 计算可视画布区域的中心位置（世界坐标）
+   * 使用 viewportRef.current 获取最新的视口状态，避免闭包陈旧值问题
+   * @param width 图片宽度（世界坐标）
+   * @param height 图片高度（世界坐标）
+   * @returns 图片左上角的世界坐标位置，使得图片中心对准可视区域中心
+   */
   const getCanvasCenter = (width: number, height: number) => {
     const { width: canvasWidth, height: canvasHeight } = getCanvasDimensions();
+    // ✅ 使用 viewportRef.current 获取最新视口状态，避免异步操作中的闭包陈旧值
+    const currentViewport = viewportRef.current;
 
-    const centerX = (canvasWidth / 2 - viewport.x) / viewport.zoom;
-    const centerY = (canvasHeight / 2 - viewport.y) / viewport.zoom;
+    // 屏幕中心点转换为世界坐标
+    const centerX = (canvasWidth / 2 - currentViewport.x) / currentViewport.zoom;
+    const centerY = (canvasHeight / 2 - currentViewport.y) / currentViewport.zoom;
 
+    // 返回图片左上角位置，使图片中心对准可视区域中心
     return {
       x: centerX - (width / 2),
       y: centerY - (height / 2)
     };
   };
 
-  // Helper to constrain image size to fit within canvas viewport
-  // Returns constrained dimensions while maintaining aspect ratio
+  /**
+   * 获取当前所有图片中最大的 z-index 值
+   * 使用 imagesRef.current 获取最新的图片列表，避免闭包陈旧值问题
+   * @returns 最大 z-index 值，如果没有图片则返回 0
+   */
+  const getMaxZIndex = (): number => {
+    const currentImages = imagesRef.current;
+    if (currentImages.length === 0) return 0;
+    return Math.max(...currentImages.map(img => img.zIndex));
+  };
+
+  /**
+   * 约束图片尺寸以适应当前可视区域
+   * 策略：无论当前缩放级别如何，图片在屏幕上的显示尺寸应保持一致，
+   * 目标是占可视区域的 60%（既不会太大占据整个画布，也不会太小难以看清）
+   * 
+   * @param originalWidth 原始图片宽度（像素）
+   * @param originalHeight 原始图片高度（像素）
+   * @param maxWidth 可选的最大宽度限制（世界坐标）
+   * @param maxHeight 可选的最大高度限制（世界坐标）
+   * @returns 约束后的尺寸（世界坐标），保持原始宽高比
+   */
   const constrainImageSize = (
     originalWidth: number,
     originalHeight: number,
     maxWidth?: number,
     maxHeight?: number
   ): { width: number; height: number } => {
-    // Get canvas dimensions if not provided
     const { width: canvasWidth, height: canvasHeight } = getCanvasDimensions();
+    // ✅ 使用 viewportRef.current 获取最新视口状态
+    const currentZoom = viewportRef.current.zoom;
 
-    // Use provided max dimensions or calculate from canvas (with some padding)
-    // 留出一些边距，确保图片不会紧贴边缘
-    const padding = 40;
-    const effectiveMaxWidth = maxWidth ?? (canvasWidth / viewport.zoom - padding);
-    const effectiveMaxHeight = maxHeight ?? (canvasHeight / viewport.zoom - padding);
+    // 目标显示比例：图片在屏幕上占可视区域的 60%
+    const viewportRatio = 0.6;
+    const padding = 40; // 边距（屏幕像素）
 
-    // Calculate aspect ratio
+    // 计算目标显示尺寸（屏幕像素）
+    const targetDisplayWidth = (canvasWidth - padding * 2) * viewportRatio;
+    const targetDisplayHeight = (canvasHeight - padding * 2) * viewportRatio;
+
+    // 将目标显示尺寸转换为世界坐标尺寸
+    // worldSize = displaySize / zoom
+    const targetWorldWidth = maxWidth ?? (targetDisplayWidth / currentZoom);
+    const targetWorldHeight = maxHeight ?? (targetDisplayHeight / currentZoom);
+
+    // 保持原始宽高比
     const aspectRatio = originalWidth / originalHeight;
 
-    let finalWidth = originalWidth;
-    let finalHeight = originalHeight;
+    // 计算适应目标区域的尺寸（自动缩放以适应，无论放大还是缩小）
+    let finalWidth: number;
+    let finalHeight: number;
 
-    // Scale down if image exceeds max dimensions
-    if (finalWidth > effectiveMaxWidth || finalHeight > effectiveMaxHeight) {
-      const widthRatio = effectiveMaxWidth / finalWidth;
-      const heightRatio = effectiveMaxHeight / finalHeight;
-      // Use the smaller ratio to ensure both dimensions fit
-      const scaleRatio = Math.min(widthRatio, heightRatio);
-
-      finalWidth = originalWidth * scaleRatio;
-      finalHeight = originalHeight * scaleRatio;
+    // 根据宽高比决定以哪个维度为基准
+    if (aspectRatio > targetWorldWidth / targetWorldHeight) {
+      // 图片较宽，以宽度为基准
+      finalWidth = targetWorldWidth;
+      finalHeight = finalWidth / aspectRatio;
+    } else {
+      // 图片较高，以高度为基准
+      finalHeight = targetWorldHeight;
+      finalWidth = finalHeight * aspectRatio;
     }
 
     return { width: finalWidth, height: finalHeight };
@@ -267,7 +306,7 @@ const App: React.FC = () => {
         y: yPos,
         width: finalWidth,
         height: finalHeight,
-        zIndex: images.length + 1,
+        zIndex: getMaxZIndex() + 1, // ✅ 使用最大 z-index + 1，确保新图片在最顶层
         prompt: '导入的图片'
       };
 
@@ -304,7 +343,7 @@ const App: React.FC = () => {
         y: pos.y,
         width: finalWidth,
         height: finalHeight,
-        zIndex: images.length + 1,
+        zIndex: getMaxZIndex() + 1, // ✅ 使用最大 z-index + 1，确保新图片在最顶层
         prompt: prompt
       };
 
@@ -347,7 +386,7 @@ const App: React.FC = () => {
         height: finalHeight,
         x: pos.x + 40,
         y: pos.y + 40,
-        zIndex: images.length + 2,
+        zIndex: getMaxZIndex() + 1, // ✅ 使用最大 z-index + 1，确保新图片在最顶层
         prompt: prompt
       };
 

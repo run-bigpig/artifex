@@ -142,6 +142,23 @@ const Canvas: React.FC<CanvasProps> = ({
     });
   }, [setSelectedImageId]);
 
+  // ✅ 同步外部传入的 selectedImageId 到内部的 selectedImageIds
+  // 当 App.tsx 中新增图片并设置 selectedImageId 时，自动更新 selectedImageIds
+  useEffect(() => {
+    if (selectedImageId) {
+      // 如果外部设置了 selectedImageId，且当前 selectedImageIds 不包含它，
+      // 说明是外部新增图片导致的选中变化，需要同步
+      if (!selectedImageIds.has(selectedImageId)) {
+        setSelectedImageIds(new Set([selectedImageId]));
+      }
+    } else {
+      // 如果外部清空了 selectedImageId，同步清空 selectedImageIds
+      if (selectedImageIds.size > 0) {
+        setSelectedImageIds(new Set());
+      }
+    }
+  }, [selectedImageId]); // 仅依赖 selectedImageId，避免循环更新
+
   // ✅ 坐标转换工具函数
 
   /**
