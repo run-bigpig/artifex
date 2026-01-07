@@ -93,6 +93,12 @@ const Canvas: React.FC<CanvasProps> = ({
   // 用于避免 useEffect 中重复保存历史记录
   const isBatchOperationRef = useRef(false);
 
+  // ✅ 拖拽优化：使用 ref 存储拖拽数据，避免状态更新延迟导致的跟手感差
+  // 记录拖拽开始时的鼠标位置（屏幕坐标）
+  const dragStartPointRef = useRef<Point>({ x: 0, y: 0 });
+  // 记录拖拽开始时每个选中图片的初始位置（世界坐标）
+  const dragStartPositionsRef = useRef<Map<string, Point>>(new Map());
+
   // ✅ 多选状态管理工具函数
 
   /**
@@ -728,73 +734,159 @@ const Canvas: React.FC<CanvasProps> = ({
   }, [handleWheel]);
 
   // 监听键盘事件，跟踪 Alt 键状态
+  // ✅ 修复：添加焦点丢失、页面可见性变化等边界情况的处理
+  // 防止其他应用的组合快捷键（如 Ctrl+Alt+A）导致 Alt 键状态异常
   useEffect(() => {
+    /**
+     * 重置 Alt 键状态的辅助函数
+     * 用于在焦点丢失、页面不可见等情况下强制重置状态
+     */
+    const resetAltKeyState = () => {
+      if (altKeyPressedRef.current) {
+        altKeyPressedRef.current = false;
+        setIsDragOutMode(false);
+      }
+    };
+
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Alt' || e.altKey) {
+      // ✅ 修复：只在单独按下 Alt 键时触发，排除组合键（如 Ctrl+Alt+A）
+      // 这样可以避免其他应用的组合快捷键影响画布状态
+      if (e.key === 'Alt' && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
         altKeyPressedRef.current = true;
         setIsDragOutMode(true);
       }
     };
     
     const handleKeyUp = (e: KeyboardEvent) => {
-      if (e.key === 'Alt' || !e.altKey) {
-        altKeyPressedRef.current = false;
-        setIsDragOutMode(false);
+      // 当 Alt 键释放时重置状态
+      if (e.key === 'Alt') {
+        resetAltKeyState();
       }
+    };
+
+    /**
+     * 处理窗口失去焦点事件
+     * 当用户切换到其他应用时，重置所有修饰键状态
+     * 这可以防止 keyup 事件丢失导致的状态异常
+     */
+    const handleWindowBlur = () => {
+      resetAltKeyState();
+    };
+
+    /**
+     * 处理页面可见性变化事件
+     * 当页面变为不可见（如切换标签页）时，重置修饰键状态
+     */
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        resetAltKeyState();
+      }
+    };
+
+    /**
+     * 处理右键菜单事件
+     * 右键菜单可能导致键盘事件丢失，需要重置状态
+     */
+    const handleContextMenu = () => {
+      resetAltKeyState();
     };
     
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
+    window.addEventListener('blur', handleWindowBlur);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('contextmenu', handleContextMenu);
     
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
+      window.removeEventListener('blur', handleWindowBlur);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('contextmenu', handleContextMenu);
     };
   }, []);
 
   // 监听键盘事件，跟踪 Ctrl 键状态（用于对称扩展功能）
+  // ✅ 修复：添加焦点丢失等边界情况的处理
   useEffect(() => {
+    const resetCtrlKeyState = () => {
+      ctrlKeyPressedRef.current = false;
+    };
+
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Control' || e.ctrlKey || e.metaKey) {
+      if (e.key === 'Control' || e.key === 'Meta') {
         ctrlKeyPressedRef.current = true;
       }
     };
 
     const handleKeyUp = (e: KeyboardEvent) => {
-      if (e.key === 'Control' || (!e.ctrlKey && !e.metaKey)) {
-        ctrlKeyPressedRef.current = false;
+      if (e.key === 'Control' || e.key === 'Meta') {
+        resetCtrlKeyState();
+      }
+    };
+
+    const handleWindowBlur = () => {
+      resetCtrlKeyState();
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        resetCtrlKeyState();
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
+    window.addEventListener('blur', handleWindowBlur);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
 
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
+      window.removeEventListener('blur', handleWindowBlur);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, []);
 
   // ✅ 监听键盘 Shift 键状态，用于更新鼠标样式
+  // ✅ 修复：添加焦点丢失等边界情况的处理
   useEffect(() => {
+    const resetShiftKeyState = () => {
+      setCursorStyle('default');
+    };
+
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Shift' || e.shiftKey) {
+      if (e.key === 'Shift') {
         setCursorStyle('crosshair');
       }
     };
 
     const handleKeyUp = (e: KeyboardEvent) => {
-      if (e.key === 'Shift' || !e.shiftKey) {
-        setCursorStyle('default');
+      if (e.key === 'Shift') {
+        resetShiftKeyState();
+      }
+    };
+
+    const handleWindowBlur = () => {
+      resetShiftKeyState();
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        resetShiftKeyState();
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
+    window.addEventListener('blur', handleWindowBlur);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
 
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
+      window.removeEventListener('blur', handleWindowBlur);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, []);
 
@@ -837,6 +929,16 @@ const Canvas: React.FC<CanvasProps> = ({
 
           // 批量提升 zIndex
           updateSelectedImageZIndex(newSelectedIds, true);
+
+          // ✅ 拖拽优化：记录拖拽开始时的鼠标位置和每个选中图片的初始位置
+          dragStartPointRef.current = { x: e.clientX, y: e.clientY };
+          dragStartPositionsRef.current.clear();
+          newSelectedIds.forEach(id => {
+            const img = images.find(i => i.id === id);
+            if (img) {
+              dragStartPositionsRef.current.set(id, { x: img.x, y: img.y });
+            }
+          });
 
           setIsDraggingImage(true);
           setDragStart({ x: e.clientX, y: e.clientY });
@@ -895,6 +997,24 @@ const Canvas: React.FC<CanvasProps> = ({
         type: count > 1 ? 'batch_move' : 'move_image',
         detail: count > 1 ? `${count} 个图片` : undefined,
       };
+
+      // ✅ 拖拽优化：记录拖拽开始时的鼠标位置和每个选中图片的初始位置
+      // 使用 ref 存储，避免状态更新延迟导致的跟手感差
+      dragStartPointRef.current = { x: e.clientX, y: e.clientY };
+      
+      // 确定最终的选中集合（考虑 wasMultiSelectBeforeClick 的情况）
+      const finalSelectedIds = (wasMultiSelectBeforeClick && isSelected) 
+        ? selectedImageIds 
+        : new Set([imageId]);
+      
+      // 记录每个选中图片的初始位置
+      dragStartPositionsRef.current.clear();
+      finalSelectedIds.forEach(id => {
+        const img = images.find(i => i.id === id);
+        if (img) {
+          dragStartPositionsRef.current.set(id, { x: img.x, y: img.y });
+        }
+      });
 
       setIsDraggingImage(true);
       setDragStart({ x: e.clientX, y: e.clientY });
@@ -1029,18 +1149,24 @@ const Canvas: React.FC<CanvasProps> = ({
       ));
 
     } else if (isDraggingImage && selectedImageIds.size > 0) {
-      // ✅ 批量移动所有选中的图片
-      const dx = (e.clientX - dragStart.x) / scale;
-      const dy = (e.clientY - dragStart.y) / scale;
+      // ✅ 拖拽优化：使用绝对位置计算，避免增量累积误差
+      // 计算相对于拖拽开始点的总偏移量（世界坐标）
+      const totalDx = (e.clientX - dragStartPointRef.current.x) / scale;
+      const totalDy = (e.clientY - dragStartPointRef.current.y) / scale;
 
-      setImages(prev => prev.map(img =>
-        selectedImageIds.has(img.id)
-          ? { ...img, x: img.x + dx, y: img.y + dy }
-          : img
-      ));
-      setDragStart({ x: e.clientX, y: e.clientY });
+      // 基于初始位置 + 总偏移量计算新位置，而非增量更新
+      setImages(prev => prev.map(img => {
+        const startPos = dragStartPositionsRef.current.get(img.id);
+        if (startPos) {
+          // 使用初始位置 + 总偏移量，确保位置计算精确
+          return { ...img, x: startPos.x + totalDx, y: startPos.y + totalDy };
+        }
+        return img;
+      }));
+      // 注意：不再更新 dragStart，因为使用的是绝对位置计算
 
     } else if (isDraggingCanvas) {
+      // 画布拖拽仍使用增量更新（因为 viewport 是单一状态，不会有累积误差问题）
       setViewport(prev => ({
         ...prev,
         x: prev.x + (e.clientX - dragStart.x),
@@ -1544,17 +1670,19 @@ const Canvas: React.FC<CanvasProps> = ({
               }}
               className={`absolute group hover:ring-1 hover:ring-slate-500 transition-shadow duration-100 ${isDraggingToSidebar ? 'opacity-50' : ''}`}
               style={{
-                left: img.x,
-                top: img.y,
+                // ✅ 使用 transform: translate3d 替代 left/top，启用 GPU 加速
+                // 这能显著提升拖拽时的渲染性能，减少重排开销
+                transform: `translate3d(${img.x}px, ${img.y}px, 0)`,
                 width: img.width,
                 height: img.height,
                 zIndex: img.zIndex,
+                // 启用硬件加速的提示
+                willChange: isDraggingImage && selectedImageIds.has(img.id) ? 'transform' : 'auto',
                 boxShadow: showSelectionOrHighlight
                   ? isTempHighlighted
                     ? '0 0 0 2px #22c55e, 0 20px 25px -5px rgb(0 0 0 / 0.1)' // 临时高亮：绿色
                     : '0 0 0 2px #3b82f6, 0 20px 25px -5px rgb(0 0 0 / 0.1)' // 正常选中：蓝色
                   : 'none',
-                // 移除容器的旋转，改为只旋转图片元素
               }}
               onMouseDown={(e) => handleMouseDown(e, img.id)}
               draggable={true}
