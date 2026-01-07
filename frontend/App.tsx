@@ -95,8 +95,10 @@ const App: React.FC = () => {
   const getCanvasDimensions = () => {
     // Sidebar is always 420px wide now
     const sidebarWidth = 420;
+    // Header height is 64px (pt-16 in Tailwind = 4rem = 64px)
+    const headerHeight = 64;
     const canvasWidth = window.innerWidth - sidebarWidth;
-    const canvasHeight = window.innerHeight;
+    const canvasHeight = window.innerHeight - headerHeight;
     return { width: canvasWidth, height: canvasHeight };
   };
 
@@ -135,56 +137,46 @@ const App: React.FC = () => {
   };
 
   /**
-   * 约束图片尺寸以适应当前可视区域
-   * 策略：无论当前缩放级别如何，图片在屏幕上的显示尺寸应保持一致，
-   * 目标是占可视区域的 60%（既不会太大占据整个画布，也不会太小难以看清）
+   * 约束图片尺寸
+   * 策略：图片在屏幕上的显示尺寸保持一致（占可视区域的 40%），
+   * 然后根据当前缩放级别反推世界坐标尺寸
+   * 这样无论 zoom 是多少，图片在屏幕上的大小都是合理的
    * 
    * @param originalWidth 原始图片宽度（像素）
    * @param originalHeight 原始图片高度（像素）
-   * @param maxWidth 可选的最大宽度限制（世界坐标）
-   * @param maxHeight 可选的最大高度限制（世界坐标）
    * @returns 约束后的尺寸（世界坐标），保持原始宽高比
    */
   const constrainImageSize = (
     originalWidth: number,
-    originalHeight: number,
-    maxWidth?: number,
-    maxHeight?: number
+    originalHeight: number
   ): { width: number; height: number } => {
     const { width: canvasWidth, height: canvasHeight } = getCanvasDimensions();
-    // ✅ 使用 viewportRef.current 获取最新视口状态
     const currentZoom = viewportRef.current.zoom;
 
-    // 目标显示比例：图片在屏幕上占可视区域的 60%
-    const viewportRatio = 0.6;
-    const padding = 40; // 边距（屏幕像素）
+    // 目标：图片在屏幕上的显示尺寸占可视区域的 40%
+    const displayRatio = 0.2;
+    const targetDisplayWidth = canvasWidth * displayRatio;
+    const targetDisplayHeight = canvasHeight * displayRatio;
 
-    // 计算目标显示尺寸（屏幕像素）
-    const targetDisplayWidth = (canvasWidth - padding * 2) * viewportRatio;
-    const targetDisplayHeight = (canvasHeight - padding * 2) * viewportRatio;
-
-    // 将目标显示尺寸转换为世界坐标尺寸
-    // worldSize = displaySize / zoom
-    const targetWorldWidth = maxWidth ?? (targetDisplayWidth / currentZoom);
-    const targetWorldHeight = maxHeight ?? (targetDisplayHeight / currentZoom);
-
-    // 保持原始宽高比
+    // 保持原始宽高比，计算适应目标区域的显示尺寸
     const aspectRatio = originalWidth / originalHeight;
+    let displayWidth: number;
+    let displayHeight: number;
 
-    // 计算适应目标区域的尺寸（自动缩放以适应，无论放大还是缩小）
-    let finalWidth: number;
-    let finalHeight: number;
-
-    // 根据宽高比决定以哪个维度为基准
-    if (aspectRatio > targetWorldWidth / targetWorldHeight) {
+    if (aspectRatio > targetDisplayWidth / targetDisplayHeight) {
       // 图片较宽，以宽度为基准
-      finalWidth = targetWorldWidth;
-      finalHeight = finalWidth / aspectRatio;
+      displayWidth = targetDisplayWidth;
+      displayHeight = displayWidth / aspectRatio;
     } else {
       // 图片较高，以高度为基准
-      finalHeight = targetWorldHeight;
-      finalWidth = finalHeight * aspectRatio;
+      displayHeight = targetDisplayHeight;
+      displayWidth = displayHeight * aspectRatio;
     }
+
+    // 将显示尺寸转换为世界坐标尺寸
+    // worldSize = displaySize / zoom
+    const finalWidth = displayWidth / currentZoom;
+    const finalHeight = displayHeight / currentZoom;
 
     return { width: finalWidth, height: finalHeight };
   };

@@ -1,6 +1,6 @@
 import React, { useRef, useState, useEffect, useCallback, useMemo } from 'react';
 import { CanvasImage, Point, Viewport, CanvasActionType } from '../types';
-import { Move, ZoomIn, ZoomOut, Trash2, Edit, Upload, Copy, Check, MousePointer2, Scissors, Sparkles, Maximize2 } from 'lucide-react';
+import { Trash2, Edit, Upload, Copy, Check, MousePointer2, Scissors, Sparkles, Maximize2 } from 'lucide-react';
 import { ExportImage } from '../wailsjs/go/core/App';
 import { v4 as uuidv4 } from 'uuid';
 import { ImageIndex } from '../utils/imageIndex'; 
@@ -9,7 +9,6 @@ import {
   getPngBlob,
   createDragPreviewThumbnailSync,
   calculateZoomViewport,
-  clamp,
 } from '../utils/canvasUtils';
 import useHistoryManager, { HistoryActionType } from '../hooks/useHistoryManager';
 import HistoryPanel from './HistoryPanel';
@@ -706,10 +705,38 @@ const Canvas: React.FC<CanvasProps> = ({
     }
   }, [selectedImageId, selectedImageIds, imageIndex, handleCopyImage, setImages, handleUndo, handleRedo, recordHistory, updateSelectedIds, images]);
 
-  // --- Wheel Zoom ---
+  // --- Wheel Zoom (Photoshop-style) ---
+  // 最大缩放比例：6400%
+  const MAX_ZOOM = 64;
+  // 图片在屏幕上的最小显示尺寸（像素），低于此值停止缩小
+  const MIN_IMAGE_DISPLAY_SIZE = 2;
+
   /**
-   * 处理鼠标滚轮缩放
-   * 使用工具函数优化坐标转换和缩放计算
+   * 动态计算最小缩放级别
+   * 当最大的图片在屏幕上缩小到 MIN_IMAGE_DISPLAY_SIZE 像素时，停止缩小
+   */
+  const getMinZoom = useCallback(() => {
+    if (images.length === 0) {
+      return 0.01; // 没有图片时使用默认最小值 1%
+    }
+    // 找到最大的图片尺寸
+    let maxImageSize = 0;
+    for (const img of images) {
+      const size = Math.max(img.width, img.height);
+      if (size > maxImageSize) {
+        maxImageSize = size;
+      }
+    }
+    // 计算最小缩放：当最大图片显示为 MIN_IMAGE_DISPLAY_SIZE 像素时的缩放级别
+    // displaySize = worldSize * zoom => zoom = displaySize / worldSize
+    return MIN_IMAGE_DISPLAY_SIZE / maxImageSize;
+  }, [images]);
+
+  /**
+   * 处理鼠标滚轮缩放（Photoshop 风格）
+   * - 以鼠标指针位置为中心进行缩放
+   * - 动态最小缩放：图片缩小到点状时停止
+   * - 最大缩放：6400%
    */
   const handleWheel = useCallback((e: WheelEvent) => {
     const container = containerRef.current;
@@ -728,13 +755,21 @@ const Canvas: React.FC<CanvasProps> = ({
     const worldX = (mouseX - viewport.x) / viewport.zoom;
     const worldY = (mouseY - viewport.y) / viewport.zoom;
     
-    // 计算新的缩放比例
-    // 优化缩放步进值：使用更小的灵敏度，使缩放更平滑可控（约 5% 步进）
-    const zoomSensitivity = 0.0003;
-    const zoomDelta = -e.deltaY * zoomSensitivity;
-    const newZoom = clamp(viewport.zoom + zoomDelta, 0.1, 5);
+    // ✅ Photoshop 风格的智能缩放
+    // 使用指数缩放，使缩放更平滑自然
+    const baseSensitivity = 0.0008;
+    const zoomFactor = Math.exp(-e.deltaY * baseSensitivity);
     
-    // 使用工具函数计算新的视口位置
+    // 动态计算最小缩放级别
+    const minZoom = getMinZoom();
+    
+    // 计算新的缩放比例，并限制在合理范围内
+    const newZoom = Math.min(Math.max(viewport.zoom * zoomFactor, minZoom), MAX_ZOOM);
+    
+    // 如果缩放比例没有变化（已达到边界），不更新
+    if (newZoom === viewport.zoom) return;
+    
+    // 使用工具函数计算新的视口位置，保持鼠标指向的世界坐标点不变
     const newViewport = calculateZoomViewport(mouseX, mouseY, worldX, worldY, newZoom);
     
     setViewport(prev => ({
@@ -743,7 +778,7 @@ const Canvas: React.FC<CanvasProps> = ({
       x: newViewport.x,
       y: newViewport.y
     }));
-  }, [viewport, setViewport]);
+  }, [viewport, setViewport, getMinZoom]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -1933,18 +1968,6 @@ const Canvas: React.FC<CanvasProps> = ({
           </React.Fragment>
         );
       })}
-
-      {/* Mini Viewport HUD */}
-      <div className="absolute bottom-4 left-4 bg-slate-800/90 backdrop-blur border border-slate-700 rounded-lg p-2 text-xs flex gap-4 text-slate-300 pointer-events-none select-none">
-        <div className="flex items-center gap-1">
-          <Move size={12} />
-          <span>{Math.round(viewport.x)}, {Math.round(viewport.y)}</span>
-        </div>
-        <div className="flex items-center gap-1">
-          {viewport.zoom > 1 ? <ZoomIn size={12} /> : <ZoomOut size={12} />}
-          <span>{Math.round(viewport.zoom * 100)}%</span>
-        </div>
-      </div>
 
       {/* ✅ 选中计数器 */}
       {selectedImageIds.size > 1 && (

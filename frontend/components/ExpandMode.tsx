@@ -74,11 +74,21 @@ const ExpandMode: React.FC<ExpandModeProps> = ({
   const [smartGuides, setSmartGuides] = useState<SmartGuide[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
   
+  // 原始图片尺寸（用于显示真实像素尺寸）
+  const [naturalDims, setNaturalDims] = useState<{ width: number; height: number } | null>(null);
+  
   // 使用 ref 跟踪 Ctrl 键状态
   const ctrlKeyRef = useRef(ctrlKeyPressed);
   useEffect(() => {
     ctrlKeyRef.current = ctrlKeyPressed;
   }, [ctrlKeyPressed]);
+
+  // 获取原始图片尺寸
+  useEffect(() => {
+    getImageNaturalDimensions(image.src)
+      .then(dims => setNaturalDims(dims))
+      .catch(err => console.error('获取图片原始尺寸失败:', err));
+  }, [image.src]);
 
   // ==================== 计算辅助函数 ====================
 
@@ -550,22 +560,40 @@ const ExpandMode: React.FC<ExpandModeProps> = ({
         return null;
       })}
 
-      {/* 尺寸信息显示 */}
-      {hasExpansion && (
-        <div
-          className="absolute bg-slate-900/90 text-white text-xs px-2 py-1 rounded pointer-events-none whitespace-nowrap z-50"
-          style={{
-            left: expandedLeft + (expandedRight - expandedLeft) / 2,
-            top: expandedTop - 28,
-            transform: 'translateX(-50%)',
-          }}
-        >
-          {Math.round(image.width + expandOffsets.left + expandOffsets.right)} × {Math.round(image.height + expandOffsets.top + expandOffsets.bottom)}
-          <span className="text-slate-400 ml-1">
-            (+{Math.round(expandOffsets.left)}, +{Math.round(expandOffsets.top)}, +{Math.round(expandOffsets.right)}, +{Math.round(expandOffsets.bottom)})
-          </span>
-        </div>
-      )}
+      {/* 尺寸信息显示 - 基于原始图片像素尺寸 */}
+      {hasExpansion && naturalDims && (() => {
+        // 计算世界坐标与原始像素尺寸的比例
+        const scaleX = naturalDims.width / image.width;
+        const scaleY = naturalDims.height / image.height;
+        
+        // 将偏移量转换为原始像素尺寸
+        const naturalOffsets = {
+          left: Math.round(expandOffsets.left * scaleX),
+          top: Math.round(expandOffsets.top * scaleY),
+          right: Math.round(expandOffsets.right * scaleX),
+          bottom: Math.round(expandOffsets.bottom * scaleY),
+        };
+        
+        // 计算扩展后的原始像素尺寸
+        const newWidth = naturalDims.width + naturalOffsets.left + naturalOffsets.right;
+        const newHeight = naturalDims.height + naturalOffsets.top + naturalOffsets.bottom;
+        
+        return (
+          <div
+            className="absolute bg-slate-900/90 text-white text-xs px-2 py-1 rounded pointer-events-none whitespace-nowrap z-50"
+            style={{
+              left: expandedLeft + (expandedRight - expandedLeft) / 2,
+              top: expandedTop - 28,
+              transform: 'translateX(-50%)',
+            }}
+          >
+            {newWidth} × {newHeight}
+            <span className="text-slate-400 ml-1">
+              (+{naturalOffsets.left}, +{naturalOffsets.top}, +{naturalOffsets.right}, +{naturalOffsets.bottom})
+            </span>
+          </div>
+        );
+      })()}
 
       {/* 操作按钮 */}
       <div
