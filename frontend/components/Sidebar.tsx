@@ -63,6 +63,9 @@ const Sidebar: React.FC<SidebarProps> = ({
   // Chat State
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   
+  // 图片加载状态管理（用于骨架屏）
+  const [loadedImages, setLoadedImages] = useState<Set<string>>(new Set());
+  
   const [isDragging, setIsDragging] = useState(false);
   const [isEnhancing, setIsEnhancing] = useState(false);
   const [showResPicker, setShowResPicker] = useState(false);
@@ -301,6 +304,31 @@ const Sidebar: React.FC<SidebarProps> = ({
       prevMessagesLengthForScrollRef.current = messages.length;
     }
   }, [messages, scrollToBottom]);
+
+  // 清理过期的图片加载状态（避免内存泄漏）
+  useEffect(() => {
+    // 收集当前消息中所有有效的图片 key
+    const validKeys = new Set<string>();
+    messages.forEach(msg => {
+      if (msg.images) {
+        msg.images.forEach((_, idx) => {
+          validKeys.add(`${msg.id}-${idx}`);
+        });
+      }
+    });
+
+    // 清理不再存在的图片加载状态
+    setLoadedImages(prev => {
+      const newSet = new Set<string>();
+      prev.forEach(key => {
+        if (validKeys.has(key)) {
+          newSet.add(key);
+        }
+      });
+      // 只有在实际需要清理时才更新状态
+      return newSet.size === prev.size ? prev : newSet;
+    });
+  }, [messages]);
 
   useEffect(() => {
     return () => {
@@ -1018,35 +1046,66 @@ const Sidebar: React.FC<SidebarProps> = ({
                     {/* Thumbnails in Chat */}
                     {msg.images && msg.images.length > 0 && (
                       <div className="flex flex-wrap gap-3 mb-3 mt-1">
-                        {msg.images.map((src, idx) => (
-                          <div key={idx} className="relative group/image w-full aspect-square max-w-[280px] rounded-xl overflow-hidden border border-white/10 bg-black/30 shadow-lg">
-                            <img
-                              src={normalizeAttachmentSrc(src)}
-                              className="w-full h-full object-contain"
-                              alt="result"
-                              onLoad={handleMessageMediaLoad}
-                              onError={handleMessageMediaLoad}
-                            />
-                            
-                             {/* Image Overlay Actions */}
-                             <div className="absolute inset-0 bg-black/50 opacity-0 group-hover/image:opacity-100 transition-all duration-200 flex flex-col items-center justify-center gap-3 backdrop-blur-[2px]">
-                              <button 
-                                onClick={() => onAddToCanvas(src)}
-                                className="w-32 px-4 py-2 bg-blue-600/80 text-white rounded-lg hover:bg-blue-600 hover:text-white transition-all hover:scale-105 shadow-xl border border-blue-500/30 text-sm font-medium whitespace-nowrap"
-                                title="添加到画布"
-                              >
-                                添加到画布
-                              </button>
-                               <button 
-                                onClick={() => void handleAddToReference(src)}
-                                className="w-32 px-4 py-2 bg-purple-600/80 text-white rounded-lg hover:bg-purple-600 hover:text-white transition-all hover:scale-105 shadow-xl border border-purple-500/30 text-sm font-medium whitespace-nowrap"
-                                title="作为参考"
-                              >
-                                作为参考
-                              </button>
+                        {msg.images.map((src, idx) => {
+                          // 生成唯一的图片标识符
+                          const imageKey = `${msg.id}-${idx}`;
+                          const isLoaded = loadedImages.has(imageKey);
+                          
+                          return (
+                            <div 
+                              key={idx} 
+                              className="relative group/image w-full aspect-square max-w-[280px] rounded-xl overflow-hidden border border-white/10 bg-black/30 shadow-lg"
+                              style={{ minHeight: '280px' }}
+                            >
+                              {/* 骨架屏加载指示器 */}
+                              {!isLoaded && (
+                                <div className="absolute inset-0 bg-gradient-to-br from-slate-800/80 to-slate-900/80 animate-pulse flex items-center justify-center z-10">
+                                  <div className="flex flex-col items-center gap-2">
+                                    <Loader2 size={32} className="animate-spin text-blue-400/60" />
+                                    <span className="text-xs text-slate-400/60">加载中...</span>
+                                  </div>
+                                </div>
+                              )}
+                              
+                              {/* 实际图片 */}
+                              <img
+                                src={normalizeAttachmentSrc(src)}
+                                className={`w-full h-full object-contain transition-opacity duration-500 ${
+                                  isLoaded ? 'opacity-100' : 'opacity-0'
+                                }`}
+                                alt="result"
+                                onLoad={() => {
+                                  setLoadedImages(prev => new Set(prev).add(imageKey));
+                                  handleMessageMediaLoad();
+                                }}
+                                onError={() => {
+                                  setLoadedImages(prev => new Set(prev).add(imageKey));
+                                  handleMessageMediaLoad();
+                                }}
+                              />
+                              
+                              {/* Image Overlay Actions - 只在图片加载完成后显示 */}
+                              {isLoaded && (
+                                <div className="absolute inset-0 bg-black/50 opacity-0 group-hover/image:opacity-100 transition-all duration-200 flex flex-col items-center justify-center gap-3 backdrop-blur-[2px]">
+                                  <button 
+                                    onClick={() => onAddToCanvas(src)}
+                                    className="w-32 px-4 py-2 bg-blue-600/80 text-white rounded-lg hover:bg-blue-600 hover:text-white transition-all hover:scale-105 shadow-xl border border-blue-500/30 text-sm font-medium whitespace-nowrap"
+                                    title="添加到画布"
+                                  >
+                                    添加到画布
+                                  </button>
+                                  <button 
+                                    onClick={() => void handleAddToReference(src)}
+                                    className="w-32 px-4 py-2 bg-purple-600/80 text-white rounded-lg hover:bg-purple-600 hover:text-white transition-all hover:scale-105 shadow-xl border border-purple-500/30 text-sm font-medium whitespace-nowrap"
+                                    title="作为参考"
+                                  >
+                                    作为参考
+                                  </button>
+                                </div>
+                              )}
                             </div>
-                          </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     )}
                     

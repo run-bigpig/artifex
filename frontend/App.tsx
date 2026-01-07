@@ -113,14 +113,38 @@ const App: React.FC = () => {
     // ✅ 使用 viewportRef.current 获取最新视口状态，避免异步操作中的闭包陈旧值
     const currentViewport = viewportRef.current;
 
-    // 屏幕中心点转换为世界坐标
-    const centerX = (canvasWidth / 2 - currentViewport.x) / currentViewport.zoom;
-    const centerY = (canvasHeight / 2 - currentViewport.y) / currentViewport.zoom;
+    // 确保 zoom 在有效范围内（防止除零或极端值）
+    const safeZoom = Math.max(0.001, Math.min(100, currentViewport.zoom));
+    
+    // ✅ 优化：屏幕中心点转换为世界坐标
+    // 公式推导：screenX = viewport.x + worldX * zoom
+    // 反推：worldX = (screenX - viewport.x) / zoom
+    const screenCenterX = canvasWidth / 2;
+    const screenCenterY = canvasHeight / 2;
+    
+    const worldCenterX = (screenCenterX - currentViewport.x) / safeZoom;
+    const worldCenterY = (screenCenterY - currentViewport.y) / safeZoom;
 
     // 返回图片左上角位置，使图片中心对准可视区域中心
+    const imageX = worldCenterX - (width / 2);
+    const imageY = worldCenterY - (height / 2);
+
+    // ✅ 开发模式下输出调试信息（仅在控制台）
+    if (process.env.NODE_ENV === 'development') {
+      console.debug('[getCanvasCenter] 位置计算:', {
+        canvasDimensions: { width: canvasWidth, height: canvasHeight },
+        viewport: currentViewport,
+        safeZoom,
+        screenCenter: { x: screenCenterX, y: screenCenterY },
+        worldCenter: { x: worldCenterX, y: worldCenterY },
+        imageDimensions: { width, height },
+        imagePosition: { x: imageX, y: imageY }
+      });
+    }
+
     return {
-      x: centerX - (width / 2),
-      y: centerY - (height / 2)
+      x: imageX,
+      y: imageY
     };
   };
 
@@ -136,10 +160,64 @@ const App: React.FC = () => {
   };
 
   /**
+   * ✅ 可选功能：自动调整视口，确保指定图片完全可见
+   * 如果图片已经在可视区域内，则不调整
+   * 如果图片部分或完全在可视区域外，则平滑移动视口使其居中
+   * 
+   * @param image 要确保可见的图片
+   */
+  const ensureImageVisible = (image: CanvasImage) => {
+    const { width: canvasWidth, height: canvasHeight } = getCanvasDimensions();
+    const currentViewport = viewportRef.current;
+
+    // 计算图片在屏幕上的边界
+    const imageScreenX = currentViewport.x + image.x * currentViewport.zoom;
+    const imageScreenY = currentViewport.y + image.y * currentViewport.zoom;
+    const imageScreenWidth = image.width * currentViewport.zoom;
+    const imageScreenHeight = image.height * currentViewport.zoom;
+
+    // 检查图片是否完全在可视区域内
+    const isFullyVisible = 
+      imageScreenX >= 0 &&
+      imageScreenY >= 0 &&
+      imageScreenX + imageScreenWidth <= canvasWidth &&
+      imageScreenY + imageScreenHeight <= canvasHeight;
+
+    if (isFullyVisible) {
+      // 图片已经完全可见，不需要调整
+      return;
+    }
+
+    // 计算将图片居中所需的新 viewport 位置
+    // 目标：图片中心对准屏幕中心
+    const imageCenterWorldX = image.x + image.width / 2;
+    const imageCenterWorldY = image.y + image.height / 2;
+
+    // 新的 viewport 位置（保持 zoom 不变）
+    const newViewportX = canvasWidth / 2 - imageCenterWorldX * currentViewport.zoom;
+    const newViewportY = canvasHeight / 2 - imageCenterWorldY * currentViewport.zoom;
+
+    if (process.env.NODE_ENV === 'development') {
+      console.debug('[ensureImageVisible] 调整视口:', {
+        image: { id: image.id, x: image.x, y: image.y, width: image.width, height: image.height },
+        currentViewport,
+        isFullyVisible,
+        newViewport: { x: newViewportX, y: newViewportY, zoom: currentViewport.zoom }
+      });
+    }
+
+    // 平滑移动视口
+    setViewport({
+      x: newViewportX,
+      y: newViewportY,
+      zoom: currentViewport.zoom
+    });
+  };
+
+  /**
    * 约束图片尺寸
-   * 策略：图片在屏幕上的显示尺寸保持一致（占可视区域的 40%），
-   * 然后根据当前缩放级别反推世界坐标尺寸
-   * 这样无论 zoom 是多少，图片在屏幕上的大小都是合理的
+   * 策略：图片在屏幕上始终保持较小尺寸，便于画布容纳更多内容
+   * 根据缩放级别和画布尺寸动态调整，确保图片既不会太大也不会太小
    * 
    * @param originalWidth 原始图片宽度（像素）
    * @param originalHeight 原始图片高度（像素）
@@ -152,8 +230,30 @@ const App: React.FC = () => {
     const { width: canvasWidth, height: canvasHeight } = getCanvasDimensions();
     const currentZoom = viewportRef.current.zoom;
 
-    // 目标：图片在屏幕上的显示尺寸占可视区域的 40%
-    const displayRatio = 0.4;
+    // 确保 zoom 在有效范围内
+    const safeZoom = Math.max(0.001, Math.min(100, currentZoom));
+
+    // ✅ 优化：目标显示尺寸策略
+    // 始终保持较小的显示尺寸，方便用户在画布上操作更多图片
+    let displayRatio: number;
+    
+    if (safeZoom < 0.1) {
+      // 极度缩小时：适度增大显示比例，确保图片可见但不过大
+      displayRatio = 0.2;
+    } else if (safeZoom < 0.5) {
+      // 缩小状态：保持紧凑
+      displayRatio = 0.15;
+    } else if (safeZoom > 5) {
+      // 极度放大时：减小显示比例，避免图片占满屏幕
+      displayRatio = 0.12;
+    } else if (safeZoom > 2) {
+      // 放大状态：保持较小
+      displayRatio = 0.15;
+    } else {
+      // 正常缩放 (0.5 ~ 2)：保持紧凑的默认大小
+      displayRatio = 0.18;
+    }
+    
     const targetDisplayWidth = canvasWidth * displayRatio;
     const targetDisplayHeight = canvasHeight * displayRatio;
 
@@ -174,10 +274,31 @@ const App: React.FC = () => {
 
     // 将显示尺寸转换为世界坐标尺寸
     // worldSize = displaySize / zoom
-    const finalWidth = displayWidth / currentZoom;
-    const finalHeight = displayHeight / currentZoom;
+    const finalWidth = displayWidth / safeZoom;
+    const finalHeight = displayHeight / safeZoom;
 
-    return { width: finalWidth, height: finalHeight };
+    // ✅ 边界检查：确保尺寸在合理范围内
+    // 最小尺寸：50 世界像素（防止图片太小看不见）
+    // 最大尺寸：50000 世界像素（防止极端情况）
+    const constrainedWidth = Math.max(50, Math.min(50000, finalWidth));
+    const constrainedHeight = Math.max(50, Math.min(50000, finalHeight));
+
+    // ✅ 开发模式下输出调试信息
+    if (process.env.NODE_ENV === 'development') {
+      console.debug('[constrainImageSize] 尺寸计算:', {
+        original: { width: originalWidth, height: originalHeight },
+        canvasDimensions: { width: canvasWidth, height: canvasHeight },
+        zoom: currentZoom,
+        safeZoom,
+        displayRatio,
+        targetDisplay: { width: targetDisplayWidth, height: targetDisplayHeight },
+        calculatedDisplay: { width: displayWidth, height: displayHeight },
+        worldSize: { width: finalWidth, height: finalHeight },
+        constrainedSize: { width: constrainedWidth, height: constrainedHeight }
+      });
+    }
+
+    return { width: constrainedWidth, height: constrainedHeight };
   };
 
   // Handle actions triggered from the Canvas (Floating Menu)
@@ -268,12 +389,18 @@ const App: React.FC = () => {
     setSelectedImageId(null);
   };
 
+  /**
+   * 导入图片到画布
+   * @param imageSrc 图片源（base64 或 imageRef）
+   * @param dropX 可选的拖放 X 坐标（世界坐标）
+   * @param dropY 可选的拖放 Y 坐标（世界坐标）
+   */
   const handleImportImage = async (imageSrc: string, dropX?: number, dropY?: number) => {
     try {
       const imageRef = await storeImage(imageSrc);
       const { width, height } = await loadImageDimensions(imageRef);
 
-      // Constrain image size to fit within canvas viewport while maintaining aspect ratio
+      // 约束图片尺寸，使其在画布上显示合理
       const { width: finalWidth, height: finalHeight } = constrainImageSize(width, height);
 
       const newId = generateId();
@@ -281,13 +408,33 @@ const App: React.FC = () => {
       let xPos, yPos;
 
       if (dropX !== undefined && dropY !== undefined) {
+        // 用户拖放到指定位置：图片中心对准拖放点
         xPos = dropX - (finalWidth / 2);
         yPos = dropY - (finalHeight / 2);
+        
+        if (process.env.NODE_ENV === 'development') {
+          console.debug('[handleImportImage] 拖放导入:', {
+            dropPoint: { x: dropX, y: dropY },
+            imageSize: { width: finalWidth, height: finalHeight },
+            imagePosition: { x: xPos, y: yPos }
+          });
+        }
       } else {
+        // 自动导入：放置在可视区域中心
         const center = getCanvasCenter(finalWidth, finalHeight);
-        const offset = images.length * 20; // Stagger slightly if multiple imports
+        // 轻微偏移，避免多个导入的图片完全重叠
+        const offset = (images.length % 10) * 20; // 使用模运算限制偏移量累积
         xPos = center.x + offset;
         yPos = center.y + offset;
+        
+        if (process.env.NODE_ENV === 'development') {
+          console.debug('[handleImportImage] 自动导入:', {
+            center,
+            offset,
+            imageSize: { width: finalWidth, height: finalHeight },
+            imagePosition: { x: xPos, y: yPos }
+          });
+        }
       }
 
       const newImage: CanvasImage = {
@@ -302,17 +449,26 @@ const App: React.FC = () => {
       };
 
       setImages(prev => [...prev, newImage]);
-      // Auto-select imported image
+      // 自动选中新导入的图片
       setSelectedImageId(newId);
+
+      // ✅ 自动调整视口，确保新图片完全可见
+      requestAnimationFrame(() => {
+        ensureImageVisible(newImage);
+      });
     } catch (e) {
-      console.error("Failed to load image dimensions", e);
+      console.error("[handleImportImage] 导入图片失败:", e);
     }
   };
 
+  /**
+   * 生成新图片
+   * @param prompt 生成提示词
+   * @returns 图片引用
+   */
   const handleGenerate = async (prompt: string): Promise<string> => {
     setIsProcessing(true);
     try {
-      // Pass modelSettings here
       // 生成模式下，aspectRatio 和 imageSize 必须有值，使用默认值
       const settingsForGenerate: ModelSettings = {
         ...modelSettings,
@@ -322,9 +478,10 @@ const App: React.FC = () => {
       const imageRef = await generateImage(prompt, settingsForGenerate);
       const { width, height } = await loadImageDimensions(imageRef);
 
-      // Constrain image size to fit within canvas viewport while maintaining aspect ratio
+      // 约束图片尺寸，使其在画布上显示合理
       const { width: finalWidth, height: finalHeight } = constrainImageSize(width, height);
 
+      // 计算图片位置（居中显示）
       const pos = getCanvasCenter(finalWidth, finalHeight);
 
       const newImage: CanvasImage = {
@@ -338,17 +495,39 @@ const App: React.FC = () => {
         prompt: prompt
       };
 
+      if (process.env.NODE_ENV === 'development') {
+        console.debug('[handleGenerate] 生成图片:', {
+          prompt,
+          settings: settingsForGenerate,
+          originalSize: { width, height },
+          finalSize: { width: finalWidth, height: finalHeight },
+          position: { x: pos.x, y: pos.y }
+        });
+      }
+
       setImages(prev => [...prev, newImage]);
       setSelectedImageId(newImage.id);
+      
+      // ✅ 自动确保新生成的图片可见
+      requestAnimationFrame(() => {
+        ensureImageVisible(newImage);
+      });
+      
       return imageRef;
     } catch (error) {
-      console.error(error);
+      console.error("[handleGenerate] 生成图片失败:", error);
       throw error;
     } finally {
       setIsProcessing(false);
     }
   };
 
+  /**
+   * 编辑图片
+   * @param prompt 编辑提示词
+   * @param base64Sources 源图片列表（base64 格式）
+   * @returns 编辑后的图片引用
+   */
   const handleEdit = async (prompt: string, base64Sources: string[]): Promise<string> => {
     if (base64Sources.length === 0) throw new Error("No source images");
 
@@ -364,28 +543,48 @@ const App: React.FC = () => {
       );
       const { width, height } = await loadImageDimensions(imageRef);
 
-      // Constrain image size to fit within canvas viewport while maintaining aspect ratio
+      // 约束图片尺寸，使其在画布上显示合理
       const { width: finalWidth, height: finalHeight } = constrainImageSize(width, height);
 
-      // Place slightly offset from center to distinguish from original if it was centered
+      // 计算图片位置（居中显示，略微偏移以区分原图）
       const pos = getCanvasCenter(finalWidth, finalHeight);
+      // 添加轻微偏移，避免与原图完全重叠
+      const offsetX = 40;
+      const offsetY = 40;
 
       const newImage: CanvasImage = {
         id: generateId(),
         src: imageRef,
         width: finalWidth,
         height: finalHeight,
-        x: pos.x + 40,
-        y: pos.y + 40,
+        x: pos.x + offsetX,
+        y: pos.y + offsetY,
         zIndex: getMaxZIndex() + 1, // ✅ 使用最大 z-index + 1，确保新图片在最顶层
         prompt: prompt
       };
 
+      if (process.env.NODE_ENV === 'development') {
+        console.debug('[handleEdit] 编辑图片:', {
+          prompt,
+          sourceCount: base64Sources.length,
+          originalSize: { width, height },
+          finalSize: { width: finalWidth, height: finalHeight },
+          position: { x: newImage.x, y: newImage.y },
+          offset: { x: offsetX, y: offsetY }
+        });
+      }
+
       setImages(prev => [...prev, newImage]);
       setSelectedImageId(newImage.id);
+      
+      // ✅ 自动确保新编辑的图片可见
+      requestAnimationFrame(() => {
+        ensureImageVisible(newImage);
+      });
+      
       return imageRef;
     } catch (error) {
-      console.error(error);
+      console.error("[handleEdit] 编辑图片失败:", error);
       throw error;
     } finally {
       setIsProcessing(false);
