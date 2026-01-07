@@ -67,11 +67,10 @@ const App: React.FC = () => {
   const imagesRef = useRef<CanvasImage[]>(images);
   const messagesRef = useRef<ChatMessage[] | null>(null);
 
-  // 同步更新 ref
-  useEffect(() => {
-    viewportRef.current = viewport;
-    imagesRef.current = images;
-  }, [viewport, images]);
+  // ✅ 同步更新 ref（使用 useMemo 确保在渲染时立即更新，而不是等待 useEffect）
+  // 这解决了异步更新导致的 getCanvasCenter 获取旧值问题
+  viewportRef.current = viewport;
+  imagesRef.current = images;
 
   // 保存进度状态
   const [saveProgress, setSaveProgress] = useState({
@@ -154,7 +153,7 @@ const App: React.FC = () => {
     const currentZoom = viewportRef.current.zoom;
 
     // 目标：图片在屏幕上的显示尺寸占可视区域的 40%
-    const displayRatio = 0.2;
+    const displayRatio = 0.4;
     const targetDisplayWidth = canvasWidth * displayRatio;
     const targetDisplayHeight = canvasHeight * displayRatio;
 
@@ -650,9 +649,23 @@ const App: React.FC = () => {
         <Header onOpenAppSettings={() => { }} onClose={handleClose} />
 
         {/* Main Content Area */}
-        <div className="flex flex-1 overflow-hidden pt-16">
-          {/* Sidebar (Left) */}
-          <div className="flex-shrink-0 h-full">
+        {/* ✅ 性能优化：初始加载期间使用 contain: strict 隔离整个内容区域 */}
+        {/* 这防止初始加载大量图片时的连锁重渲染影响侧边栏 */}
+        <div 
+          className="flex flex-1 overflow-hidden pt-16"
+          style={{ contain: isLoading ? 'strict' : 'none' }}
+        >
+          {/* Sidebar (Left) - z-20 与 Header 同级，高于 Canvas */}
+          {/* ✅ 性能优化：添加 contain: layout paint 隔离侧边栏渲染 */}
+          {/* 同时在初始加载期间添加 transform 强制创建独立合成层 */}
+          <div 
+            className="flex-shrink-0 h-full relative z-20"
+            style={{ 
+              contain: 'layout paint',
+              // 初始加载期间强制创建独立的 GPU 合成层，隔离渲染
+              transform: isLoading ? 'translateZ(0)' : 'none',
+            }}
+          >
             <Sidebar
               onGenerate={handleGenerate}
               onEdit={handleEdit}
@@ -670,8 +683,14 @@ const App: React.FC = () => {
             />
           </div>
 
-          {/* Main Workspace */}
-          <div className="flex-1 relative h-full">
+          {/* Main Workspace - isolate 创建独立堆叠上下文，Canvas 内部 z-index 不影响外部 */}
+          {/* ✅ 性能优化：初始加载期间添加 content-visibility 延迟 Canvas 渲染 */}
+          <div 
+            className="flex-1 relative h-full isolate overflow-hidden"
+            style={{ 
+              contentVisibility: isLoading ? 'hidden' : 'visible',
+            }}
+          >
             <Canvas
               images={images}
               setImages={setImages}

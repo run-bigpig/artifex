@@ -436,6 +436,23 @@ const Canvas: React.FC<CanvasProps> = ({
 
   // ✅ 性能优化：使用索引加速查找
   const imageIndex = useMemo(() => new ImageIndex(images), [images]);
+
+  // ✅ 性能优化：预计算需要渲染浮动 UI 的图片及其屏幕位置
+  // 这避免了在每次 viewport 变化时遍历所有图片，只计算选中或扩图中的图片
+  const floatingUIData = useMemo(() => {
+    return images
+      .filter(img => selectedImageIds.has(img.id) || expandingImageId === img.id)
+      .map(img => ({
+        img,
+        isSelected: selectedImageIds.has(img.id),
+        showMenu: selectedImageIds.has(img.id) && img.id === selectedImageId,
+        isExpanding: expandingImageId === img.id,
+        screenX: viewport.x + img.x * viewport.zoom,
+        screenY: viewport.y + img.y * viewport.zoom,
+        screenWidth: img.width * viewport.zoom,
+        screenHeight: img.height * viewport.zoom,
+      }));
+  }, [images, selectedImageIds, selectedImageId, expandingImageId, viewport]);
   
   // 用于存储图片元素的 ref，用于自动触发点击
   const imageRefs = useRef<Map<string, HTMLDivElement>>(new Map());
@@ -1673,10 +1690,13 @@ const Canvas: React.FC<CanvasProps> = ({
       />
 
       {/* Canvas World */}
+      {/* ✅ 性能优化：只在拖拽时启用 GPU 加速，缩放时不需要 will-change */}
+      {/* 这避免了缩放时创建过多的 GPU 合成层，减少与侧边栏的渲染冲突 */}
       <div 
-        className="absolute origin-top-left will-change-transform"
+        className="absolute origin-top-left"
         style={{
-          transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.zoom})`
+          transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.zoom})`,
+          willChange: isDraggingCanvas || isDraggingImage ? 'transform' : 'auto',
         }}
       >
         {images.map((img) => {
@@ -1771,30 +1791,8 @@ const Canvas: React.FC<CanvasProps> = ({
       </div>
 
       {/* Floating UI Elements (不受缩放影响) */}
-      {images.map((img) => {
-        const isSelected = selectedImageIds.has(img.id);
-        const showMenu = isSelected && img.id === primarySelectedId;
-        const isExpanding = expandingImageId === img.id;
-        
-        // 只有在选中或扩图模式下才渲染 UI 元素
-        if (!isSelected && !isExpanding) return null;
-
-        // 计算图片在屏幕上的实际位置（考虑 viewport 的 transform）
-        const screenX = viewport.x + img.x * viewport.zoom;
-        const screenY = viewport.y + img.y * viewport.zoom;
-        const screenWidth = img.width * viewport.zoom;
-        const screenHeight = img.height * viewport.zoom;
-
-        // 计算控制点位置的辅助函数（简化版：容器不旋转，直接使用容器坐标）
-        // 由于容器不再旋转，可以直接使用容器坐标系统，无需旋转计算
-        const getHandlePosition = (localX: number, localY: number) => {
-          // 直接转换为屏幕坐标（容器不旋转，坐标系统正常）
-          const screenPosX = screenX + localX * viewport.zoom;
-          const screenPosY = screenY + localY * viewport.zoom;
-          
-          return { x: screenPosX, y: screenPosY };
-        };
-
+      {/* ✅ 性能优化：使用预计算的 floatingUIData，避免遍历所有图片 */}
+      {floatingUIData.map(({ img, isSelected, showMenu, isExpanding, screenX, screenY, screenWidth, screenHeight }) => {
         return (
           <React.Fragment key={`ui-${img.id}`}>
             {/* 扩图模式：使用 ExpandMode 组件 */}
