@@ -98,6 +98,8 @@ const Canvas: React.FC<CanvasProps> = ({
   const dragStartPointRef = useRef<Point>({ x: 0, y: 0 });
   // 记录拖拽开始时每个选中图片的初始位置（世界坐标）
   const dragStartPositionsRef = useRef<Map<string, Point>>(new Map());
+  // 记录画布拖拽开始时的 viewport 初始位置
+  const viewportStartRef = useRef<Point>({ x: 0, y: 0 });
 
   // ✅ 多选状态管理工具函数
 
@@ -1034,6 +1036,10 @@ const Canvas: React.FC<CanvasProps> = ({
         updateSelectedIds(new Set());
       } else {
         // 普通点击：拖拽画布
+        // ✅ 拖拽优化：记录拖拽开始时的鼠标位置和 viewport 初始位置
+        dragStartPointRef.current = { x: e.clientX, y: e.clientY };
+        viewportStartRef.current = { x: viewport.x, y: viewport.y };
+        
         setIsDraggingCanvas(true);
         setDragStart({ x: e.clientX, y: e.clientY });
         // ✅ 点击空白处：清空所有选中（使用 updateSelectedIds 保持同步）
@@ -1166,13 +1172,18 @@ const Canvas: React.FC<CanvasProps> = ({
       // 注意：不再更新 dragStart，因为使用的是绝对位置计算
 
     } else if (isDraggingCanvas) {
-      // 画布拖拽仍使用增量更新（因为 viewport 是单一状态，不会有累积误差问题）
+      // ✅ 拖拽优化：使用绝对位置计算，避免增量累积误差
+      // 计算相对于拖拽开始点的总偏移量
+      const totalDx = e.clientX - dragStartPointRef.current.x;
+      const totalDy = e.clientY - dragStartPointRef.current.y;
+
+      // 基于初始 viewport 位置 + 总偏移量计算新位置
       setViewport(prev => ({
         ...prev,
-        x: prev.x + (e.clientX - dragStart.x),
-        y: prev.y + (e.clientY - dragStart.y)
+        x: viewportStartRef.current.x + totalDx,
+        y: viewportStartRef.current.y + totalDy
       }));
-      setDragStart({ x: e.clientX, y: e.clientY });
+      // 注意：不再更新 dragStart，因为使用的是绝对位置计算
     }
   }, [isDragOutMode, isBoxSelecting, viewport.zoom, isResizing, resizingImageId, resizeStartDims, resizeStartPos, resizeHandle, originalAspectRatio, dragStart, isDraggingImage, selectedImageIds, isDraggingCanvas, setImages, setViewport]);
 
