@@ -59,7 +59,7 @@ const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
     <>
       {/* 背景遮罩 */}
       <div
-        className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center"
+        className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[200] flex items-center justify-center"
         onClick={onCancel}
       >
         {/* 对话框 */}
