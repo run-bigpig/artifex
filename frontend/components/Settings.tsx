@@ -1,17 +1,20 @@
 import React, { useState, useEffect } from 'react';
 import { Settings as SettingsType, AISettings } from '../types/settings';
 import { loadSettings, saveSettings } from '../services/settingsService';
-import { X, Save, Loader2, Eye, EyeOff, CheckCircle2, AlertCircle, RefreshCw, Info, Download, ExternalLink } from 'lucide-react';
+import { X, Save, Loader2, Eye, EyeOff, CheckCircle2, AlertCircle, RefreshCw, Info, Download, ExternalLink, FolderOpen, FolderPlus } from 'lucide-react';
 import { getCurrentVersion, checkForUpdate, updateWithProgress, restartApplication, UpdateInfo, UpdateProgress } from '../services/updateService';
+import ConfirmDialog from './ConfirmDialog';
+import { createProject, getActiveProject, openProject, selectProjectDirectory } from '../services/projectService';
 
 interface SettingsProps {
   isOpen: boolean;
   onClose: () => void;
+  onRequestRestart?: () => Promise<void>;
 }
 
-type TabType = 'ai' | 'about';
+type TabType = 'ai' | 'project' | 'about';
 
-const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
+const Settings: React.FC<SettingsProps> = ({ isOpen, onClose, onRequestRestart }) => {
   const [settings, setSettings] = useState<SettingsType | null>(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -24,6 +27,25 @@ const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
   const [updating, setUpdating] = useState(false);
   const [updateProgress, setUpdateProgress] = useState<UpdateProgress | null>(null);
   const [updateError, setUpdateError] = useState<string | null>(null);
+  const [activeProject, setActiveProject] = useState<{ id: string; path: string } | null>(null);
+  const [projectName, setProjectName] = useState('');
+  const [projectBusy, setProjectBusy] = useState(false);
+  const [projectMessage, setProjectMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [confirmDialog, setConfirmDialog] = useState<{
+    isOpen: boolean;
+    type: 'confirm' | 'warning' | 'alert';
+    title: string;
+    message: string;
+    confirmText?: string;
+    cancelText?: string;
+    onConfirm: () => void;
+  }>({
+    isOpen: false,
+    type: 'confirm',
+    title: '',
+    message: '',
+    onConfirm: () => {},
+  });
 
   // 加载设置和版本信息
   useEffect(() => {
@@ -32,6 +54,7 @@ const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
         loadSettingsData();
       }
       loadVersionInfo();
+      loadProjectData();
     } else {
       // 关闭弹窗时重置更新相关状态
       setUpdateInfo(null);
@@ -39,6 +62,7 @@ const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
       setUpdating(false);
       setUpdateProgress(null);
       setUpdateError(null);
+      setProjectMessage(null);
     }
   }, [isOpen]);
 
@@ -62,6 +86,24 @@ const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
     } catch (error) {
       console.error('Failed to load version:', error);
     }
+  };
+
+  const loadProjectData = async () => {
+    try {
+      const info = await getActiveProject();
+      setActiveProject(info);
+    } catch (error) {
+      console.error('Failed to load project info:', error);
+      setProjectMessage({ type: 'error', text: '加载项目信息失败' });
+    }
+  };
+
+  const isValidProjectId = (value: string) => /^[a-zA-Z0-9_-]+$/.test(value);
+
+  const extractProjectId = (dirPath: string) => {
+    const trimmed = dirPath.replace(/[\\/]+$/, '');
+    const parts = trimmed.split(/[/\\]/);
+    return parts[parts.length - 1] || '';
   };
 
   // 检查更新
@@ -159,6 +201,92 @@ const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
     }
   };
 
+  const requestRestart = async () => {
+    if (!onRequestRestart) {
+      setProjectMessage({ type: 'error', text: '重启功能不可用' });
+      return;
+    }
+    await onRequestRestart();
+  };
+
+  const handleCreateProject = () => {
+    setProjectMessage(null);
+    const trimmed = projectName.trim();
+    if (!trimmed) {
+      setProjectMessage({ type: 'error', text: '请输入项目名称' });
+      return;
+    }
+    if (!isValidProjectId(trimmed)) {
+      setProjectMessage({ type: 'error', text: '项目名称仅允许 a-z A-Z 0-9 _ -' });
+      return;
+    }
+
+    setConfirmDialog({
+      isOpen: true,
+      type: 'warning',
+      title: '新建项目',
+      message: `创建并切换到项目 "${trimmed}"，应用将保存并重启。继续吗？`,
+      confirmText: '创建并重启',
+      cancelText: '取消',
+      onConfirm: async () => {
+        setConfirmDialog(prev => ({ ...prev, isOpen: false }));
+        setProjectBusy(true);
+        try {
+          await createProject(trimmed);
+          await requestRestart();
+        } catch (error) {
+          console.error('Failed to create project:', error);
+          const errorMessage = error instanceof Error ? error.message : '创建项目失败';
+          setProjectMessage({ type: 'error', text: errorMessage });
+        } finally {
+          setProjectBusy(false);
+        }
+      }
+    });
+  };
+
+  const handleOpenProject = async () => {
+    setProjectMessage(null);
+    try {
+      const dirPath = await selectProjectDirectory();
+      if (!dirPath) {
+        return;
+      }
+
+      const projectId = extractProjectId(dirPath);
+      if (!isValidProjectId(projectId)) {
+        setProjectMessage({ type: 'error', text: '项目目录名称仅允许 a-z A-Z 0-9 _ -' });
+        return;
+      }
+
+      setConfirmDialog({
+        isOpen: true,
+        type: 'warning',
+        title: '打开项目',
+        message: `打开项目 "${projectId}"，应用将保存并重启。继续吗？`,
+        confirmText: '打开并重启',
+        cancelText: '取消',
+        onConfirm: async () => {
+          setConfirmDialog(prev => ({ ...prev, isOpen: false }));
+          setProjectBusy(true);
+          try {
+            await openProject(dirPath);
+            await requestRestart();
+          } catch (error) {
+            console.error('Failed to open project:', error);
+            const errorMessage = error instanceof Error ? error.message : '打开项目失败';
+            setProjectMessage({ type: 'error', text: errorMessage });
+          } finally {
+            setProjectBusy(false);
+          }
+        }
+      });
+    } catch (error) {
+      console.error('Failed to select project directory:', error);
+      setProjectMessage({ type: 'error', text: '打开项目失败' });
+    }
+  };
+
   // 更新 AI 设置
   const updateAISettings = (updates: Partial<AISettings>) => {
     if (!settings) return;
@@ -190,11 +318,22 @@ const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
   if (!settings) return null;
 
   return (
-    <div className="fixed inset-0 bg-black/20 backdrop-blur-md z-[100] flex items-center justify-center p-4" onClick={onClose}>
-      <div 
-        className="bg-slate-900 rounded-xl w-full max-w-4xl max-h-[90vh] flex flex-col shadow-2xl relative z-[101]"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <>
+      <ConfirmDialog
+        isOpen={confirmDialog.isOpen}
+        type={confirmDialog.type}
+        title={confirmDialog.title}
+        message={confirmDialog.message}
+        confirmText={confirmDialog.confirmText}
+        cancelText={confirmDialog.cancelText}
+        onConfirm={confirmDialog.onConfirm}
+        onCancel={() => setConfirmDialog(prev => ({ ...prev, isOpen: false }))}
+      />
+      <div className="fixed inset-0 bg-black/20 backdrop-blur-md z-[100] flex items-center justify-center p-4" onClick={onClose}>
+        <div 
+          className="bg-slate-900 rounded-xl w-full max-w-4xl max-h-[90vh] flex flex-col shadow-2xl relative z-[101]"
+          onClick={(e) => e.stopPropagation()}
+        >
         {/* Header */}
         <div className="flex items-center justify-between p-6 border-b border-slate-800">
           <h2 className="text-2xl font-bold text-slate-200">设置</h2>
@@ -217,6 +356,16 @@ const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
             }`}
           >
             AI 配置
+          </button>
+          <button
+            onClick={() => setActiveTab('project')}
+            className={`px-4 py-3 font-medium text-sm transition-colors border-b-2 ${
+              activeTab === 'project'
+                ? 'text-blue-400 border-blue-400'
+                : 'text-slate-400 border-transparent hover:text-slate-200'
+            }`}
+          >
+            项目
           </button>
           <button
             onClick={() => setActiveTab('about')}
@@ -515,6 +664,72 @@ const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
             </div>
           )}
 
+          {activeTab === 'project' && (
+            <div className="space-y-6">
+              <div className="p-4 bg-slate-800/50 rounded-lg space-y-2">
+                <h3 className="text-lg font-semibold text-slate-200">当前项目</h3>
+                <div className="text-sm text-slate-300">
+                  {activeProject ? activeProject.id : '未加载'}
+                </div>
+                {activeProject && (
+                  <div className="text-xs text-slate-500 break-all">
+                    {activeProject.path}
+                  </div>
+                )}
+              </div>
+
+              <div className="p-4 bg-slate-800/50 rounded-lg space-y-3">
+                <h3 className="text-lg font-semibold text-slate-200">新建项目</h3>
+                <input
+                  type="text"
+                  value={projectName}
+                  onChange={(e) => setProjectName(e.target.value)}
+                  placeholder="例如: my_project"
+                  className="w-full px-4 py-2 bg-slate-800 border border-slate-700 rounded-lg text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+                <p className="text-xs text-slate-500">仅允许 a-z A-Z 0-9 _ -</p>
+                <button
+                  onClick={handleCreateProject}
+                  disabled={projectBusy}
+                  className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <FolderPlus size={18} />
+                  创建并重启
+                </button>
+              </div>
+
+              <div className="p-4 bg-slate-800/50 rounded-lg space-y-3">
+                <h3 className="text-lg font-semibold text-slate-200">打开项目</h3>
+                <p className="text-xs text-slate-500">
+                  从项目目录中选择现有项目，确认后会保存并重启应用。
+                </p>
+                <button
+                  onClick={handleOpenProject}
+                  disabled={projectBusy}
+                  className="inline-flex items-center gap-2 px-4 py-2 border border-slate-600 text-slate-200 rounded-lg hover:bg-slate-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <FolderOpen size={18} />
+                  选择项目目录
+                </button>
+              </div>
+
+              {projectMessage && (
+                <div
+                  className={`flex items-center gap-2 text-sm ${
+                    projectMessage.type === 'success' ? 'text-green-400' : 'text-red-400'
+                  }`}
+                >
+                  {projectMessage.type === 'success' ? (
+                    <CheckCircle2 size={18} />
+                  ) : (
+                    <AlertCircle size={18} />
+                  )}
+                  <span>{projectMessage.text}</span>
+                </div>
+              )}
+            </div>
+          )}
+
           {activeTab === 'about' && (
             <div className="space-y-6">
               {/* 版本信息 */}
@@ -726,8 +941,9 @@ const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
             )}
           </div>
         </div>
+        </div>
       </div>
-    </div>
+    </>
   );
 };
 

@@ -12,6 +12,7 @@ type App struct {
 	ctx            context.Context
 	fileService    *service.FileService
 	configService  *service.ConfigService
+	projectService *service.ProjectService
 	aiService      *service.AIService
 	updateService  *service.UpdateService
 	historyService *service.HistoryService
@@ -20,6 +21,7 @@ type App struct {
 // NewApp creates a new App application struct
 func NewApp() *App {
 	// 创建服务实例
+	projectService := service.NewProjectService()
 	configService := service.NewConfigService()
 	fileService := service.NewFileService()
 	aiService := service.NewAIService(configService)
@@ -31,6 +33,7 @@ func NewApp() *App {
 	return &App{
 		fileService:    fileService,
 		configService:  configService,
+		projectService: projectService,
 		aiService:      aiService,
 		updateService:  updateService,
 		historyService: historyService,
@@ -43,6 +46,9 @@ func (a *App) Startup(ctx context.Context) {
 	a.ctx = ctx
 
 	// 初始化各个服务
+	if err := a.projectService.Startup(ctx); err != nil {
+		fmt.Printf("Failed to initialize project service: %v\n", err)
+	}
 	a.fileService.Startup(ctx)
 	if err := a.configService.Startup(ctx); err != nil {
 		fmt.Printf("Failed to initialize config service: %v\n", err)
@@ -83,7 +89,6 @@ func (a *App) StoreImage(imageDataURL string) (string, error) {
 	return a.historyService.StoreImage(imageDataURL)
 }
 
-
 // ===== 配置管理服务方法 =====
 
 // SaveSettings 保存设置
@@ -104,6 +109,70 @@ func (a *App) SaveSettings(settingsJSON string) error {
 // LoadSettings 加载设置
 func (a *App) LoadSettings() (string, error) {
 	return a.configService.LoadSettings()
+}
+
+// ===== 项目管理服务方法 =====
+
+// GetActiveProject 获取当前项目
+// 返回 JSON 格式：{"id": "...", "path": "..."}
+func (a *App) GetActiveProject() (string, error) {
+	info, err := a.projectService.GetActiveProject()
+	if err != nil {
+		return "", err
+	}
+	data, err := json.Marshal(info)
+	if err != nil {
+		return "", fmt.Errorf("failed to serialize project info: %w", err)
+	}
+	return string(data), nil
+}
+
+// ListProjects 获取项目列表
+// 返回 JSON 格式：[{"id": "...", "path": "..."}, ...]
+func (a *App) ListProjects() (string, error) {
+	projects, err := a.projectService.ListProjects()
+	if err != nil {
+		return "", err
+	}
+	data, err := json.Marshal(projects)
+	if err != nil {
+		return "", fmt.Errorf("failed to serialize project list: %w", err)
+	}
+	return string(data), nil
+}
+
+// CreateProject 创建项目并设为当前项目
+// 返回 JSON 格式：{"id": "...", "path": "..."}
+func (a *App) CreateProject(projectID string) (string, error) {
+	info, err := a.projectService.CreateProject(projectID)
+	if err != nil {
+		return "", err
+	}
+	data, err := json.Marshal(info)
+	if err != nil {
+		return "", fmt.Errorf("failed to serialize project info: %w", err)
+	}
+	return string(data), nil
+}
+
+// SelectProjectDirectory 打开目录选择对话框
+// 返回选择的目录路径
+func (a *App) SelectProjectDirectory() (string, error) {
+	return a.projectService.SelectProjectDirectory()
+}
+
+// OpenProject 打开项目并设为当前项目
+// 返回 JSON 格式：{"id": "...", "path": "..."}
+func (a *App) OpenProject(projectPath string) (string, error) {
+	info, err := a.projectService.OpenProject(projectPath)
+	if err != nil {
+		return "", err
+	}
+	data, err := json.Marshal(info)
+	if err != nil {
+		return "", fmt.Errorf("failed to serialize project info: %w", err)
+	}
+	return string(data), nil
 }
 
 // ===== AI 服务方法 =====

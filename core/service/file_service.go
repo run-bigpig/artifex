@@ -130,7 +130,7 @@ func (f *FileService) ExportImage(imageDataURL string, suggestedName string, for
 			return "", nil
 		}
 	}
-	
+
 	normalized := normalizeImageRef(imageDataURL)
 	if strings.HasPrefix(normalized, "images/") {
 		if f.imageStorage == nil {
@@ -153,7 +153,6 @@ func (f *FileService) ExportImage(imageDataURL string, suggestedName string, for
 
 		return filePath, nil
 	}
-
 
 	// 解析 base64 数据
 	// 格式: data:image/png;base64,iVBORw0KGgo...

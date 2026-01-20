@@ -7,6 +7,7 @@ import LoadingOverlay from './components/LoadingOverlay';
 import { generateImage, editMultiImages } from './services/aiService';
 import { storeImage } from './services/imageService';
 import { loadCanvasHistory, saveCanvasHistory, flushCanvasHistory, saveCanvasHistorySync, saveChatHistorySync, flushChatHistory } from './services/historyService';
+import { restartApplication } from './services/updateService';
 import { ChatMessage } from './types';
 import { serializationWorker } from './services/serializationWorker';
 import { ImageIndex, hasImagesChanged } from './utils/imageIndex';
@@ -739,25 +740,18 @@ const App: React.FC = () => {
     };
   }, [viewport, images]);
 
-  // ✅ 关闭应用前的保存处理函数
-  // 优化：立即显示保存进度弹窗，后台异步执行保存，避免卡顿
-  const handleClose = (): void => {
-    // 立即显示保存进度弹窗（同步操作，不阻塞）
+  const runSaveFlow = (afterSave: () => Promise<void>): Promise<void> => {
     setSaveProgress({
       isVisible: true,
       chatSaved: false,
       canvasSaved: false
     });
 
-    // 使用 requestAnimationFrame 确保弹窗先渲染，然后再执行保存操作
-    requestAnimationFrame(() => {
-      // 在下一个事件循环中异步执行保存操作，不阻塞 UI
-      setTimeout(async () => {
-        try {
-          // 并行保存聊天和画布历史
+    return new Promise((resolve, reject) => {
+      requestAnimationFrame(() => {
+        setTimeout(async () => {
           const savePromises: Promise<void>[] = [];
-          
-          // 保存画布历史
+
           savePromises.push(
             saveCanvasHistorySync(viewportRef.current, imagesRef.current)
               .then(() => {
@@ -765,11 +759,10 @@ const App: React.FC = () => {
               })
               .catch((error) => {
                 console.error('保存画布历史失败:', error);
-                setSaveProgress(prev => ({ ...prev, canvasSaved: true })); // 即使失败也标记为完成
+                setSaveProgress(prev => ({ ...prev, canvasSaved: true }));
               })
           );
 
-          // 保存聊天历史
           if (messagesRef.current && messagesRef.current.length > 0) {
             savePromises.push(
               saveChatHistorySync(messagesRef.current)
@@ -778,28 +771,47 @@ const App: React.FC = () => {
                 })
                 .catch((error) => {
                   console.error('保存聊天历史失败:', error);
-                  setSaveProgress(prev => ({ ...prev, chatSaved: true })); // 即使失败也标记为完成
+                  setSaveProgress(prev => ({ ...prev, chatSaved: true }));
                 })
             );
           } else {
-            // 没有消息，直接标记为完成
             setSaveProgress(prev => ({ ...prev, chatSaved: true }));
           }
 
-          // 等待所有保存完成
-          await Promise.all(savePromises);
+          try {
+            await Promise.all(savePromises);
+            await new Promise(resolveDelay => setTimeout(resolveDelay, 500));
+          } catch (error) {
+            console.error('保存历史记录时出错:', error);
+          }
 
-          // 短暂延迟，让用户看到完成状态
-          await new Promise(resolve => setTimeout(resolve, 500));
-          
-          // 保存完成后关闭应用
-          Quit();
-        } catch (error) {
-          console.error('保存历史记录时出错:', error);
-          // 即使出错也关闭应用
-          Quit();
-        }
-      }, 0);
+          try {
+            await afterSave();
+            resolve();
+          } catch (error) {
+            setSaveProgress({
+              isVisible: false,
+              chatSaved: false,
+              canvasSaved: false
+            });
+            reject(error);
+          }
+        }, 0);
+      });
+    });
+  };
+
+  // ✅ 关闭应用前的保存处理函数
+  // 优化：立即显示保存进度弹窗，后台异步执行保存，避免卡顿
+  const handleClose = (): void => {
+    void runSaveFlow(async () => {
+      Quit();
+    });
+  };
+
+  const handleRestart = (): Promise<void> => {
+    return runSaveFlow(async () => {
+      await restartApplication();
     });
   };
 
@@ -845,7 +857,7 @@ const App: React.FC = () => {
 
       <div className="flex flex-col h-screen w-screen bg-slate-950 overflow-hidden font-sans">
         {/* Header */}
-        <Header onOpenAppSettings={() => { }} onClose={handleClose} />
+        <Header onOpenAppSettings={() => { }} onClose={handleClose} onRequestRestart={handleRestart} />
 
         {/* Main Content Area */}
         {/* ✅ 性能优化：初始加载期间使用 contain: strict 隔离整个内容区域 */}

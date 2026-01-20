@@ -6,9 +6,10 @@ import SettingsComponent from './Settings';
 interface HeaderProps {
   onOpenAppSettings?: () => void;
   onClose?: () => Promise<void>;
+  onRequestRestart?: () => Promise<void>;
 }
 
-const Header: React.FC<HeaderProps> = ({ onOpenAppSettings, onClose }) => {
+const Header: React.FC<HeaderProps> = ({ onOpenAppSettings, onClose, onRequestRestart }) => {
   const [showAppSettings, setShowAppSettings] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isClosing, setIsClosing] = useState(false);
@@ -122,10 +123,13 @@ const Header: React.FC<HeaderProps> = ({ onOpenAppSettings, onClose }) => {
       </div>
 
       {/* App Settings Modal */}
-      <SettingsComponent isOpen={showAppSettings} onClose={() => setShowAppSettings(false)} />
+      <SettingsComponent
+        isOpen={showAppSettings}
+        onClose={() => setShowAppSettings(false)}
+        onRequestRestart={onRequestRestart}
+      />
     </>
   );
 };
 
 export default Header;
-

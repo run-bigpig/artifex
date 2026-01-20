@@ -63,20 +63,25 @@ func NewHistoryService() *HistoryService {
 func (h *HistoryService) Startup(ctx context.Context) error {
 	h.ctx = ctx
 
-	// 获取执行文件所在目录
+	projectDir, err := ResolveActiveProjectDir()
+	if err != nil {
+		return fmt.Errorf("failed to resolve project dir: %w", err)
+	}
+
 	exeDir, err := getExecutableDir()
 	if err != nil {
 		return fmt.Errorf("failed to get executable dir: %w", err)
 	}
+	configDir := filepath.Join(exeDir, "config")
 
-	// 创建应用数据目录（在执行文件所在目录下）
-	h.dataDir = filepath.Join(exeDir, "config")
+	// 创建项目数据目录
+	h.dataDir = projectDir
 	if err := os.MkdirAll(h.dataDir, 0755); err != nil {
 		return fmt.Errorf("failed to create app data dir: %w", err)
 	}
 
 	// ✅ 性能优化：初始化图片存储管理器
-	h.imageStorage = NewImageStorage(h.dataDir)
+	h.imageStorage = NewImageStorage(configDir)
 	if err := h.imageStorage.Initialize(); err != nil {
 		return fmt.Errorf("failed to initialize image storage: %w", err)
 	}
@@ -94,7 +99,6 @@ func (h *HistoryService) Startup(ctx context.Context) error {
 	if err := h.normalizeHistoryImages(); err != nil {
 		fmt.Printf("[HistoryService] Warning: failed to normalize history images: %v\n", err)
 	}
-
 
 	// ✅ 启动保存队列处理器（只启动一次）
 	h.saveQueueOnce.Do(func() {
@@ -814,7 +818,6 @@ func (h *HistoryService) migrateOldFormat() error {
 
 	return nil
 }
-
 
 // normalizeHistoryImages 将历史中的 base64 图片转换为图片引用（不保留兼容）
 func (h *HistoryService) normalizeHistoryImages() error {
