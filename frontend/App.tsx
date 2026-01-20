@@ -275,14 +275,28 @@ const App: React.FC = () => {
 
     // 将显示尺寸转换为世界坐标尺寸
     // worldSize = displaySize / zoom
-    const finalWidth = displayWidth / safeZoom;
-    const finalHeight = displayHeight / safeZoom;
+    const baseWidth = displayWidth / safeZoom;
+    const baseHeight = displayHeight / safeZoom;
 
-    // ✅ 边界检查：确保尺寸在合理范围内
+    // ✅ 边界检查：使用统一缩放，避免宽高比被拉伸
     // 最小尺寸：50 世界像素（防止图片太小看不见）
     // 最大尺寸：50000 世界像素（防止极端情况）
-    const constrainedWidth = Math.max(50, Math.min(50000, finalWidth));
-    const constrainedHeight = Math.max(50, Math.min(50000, finalHeight));
+    const minWorldSize = 50;
+    const maxWorldSize = 50000;
+    const minScale = Math.max(minWorldSize / baseWidth, minWorldSize / baseHeight);
+    const maxScale = Math.min(maxWorldSize / baseWidth, maxWorldSize / baseHeight);
+
+    let scale = 1;
+    if (maxScale < 1) {
+      // 优先缩小到最大约束内
+      scale = maxScale;
+    } else if (minScale > 1) {
+      // 仅在整体过小时再放大到最小约束
+      scale = minScale;
+    }
+
+    const constrainedWidth = baseWidth * scale;
+    const constrainedHeight = baseHeight * scale;
 
     // ✅ 开发模式下输出调试信息
     if (process.env.NODE_ENV === 'development') {
@@ -294,7 +308,8 @@ const App: React.FC = () => {
         displayRatio,
         targetDisplay: { width: targetDisplayWidth, height: targetDisplayHeight },
         calculatedDisplay: { width: displayWidth, height: displayHeight },
-        worldSize: { width: finalWidth, height: finalHeight },
+        worldSize: { width: baseWidth, height: baseHeight },
+        scale,
         constrainedSize: { width: constrainedWidth, height: constrainedHeight }
       });
     }
