@@ -4,7 +4,6 @@
  * 提供图片扩展功能的完整 UI 和交互逻辑：
  * - 8 个控制点（4 角 + 4 边）
  * - Ctrl 键对称扩展
- * - 智能辅助线和磁吸对齐
  * - 实时尺寸显示
  * - ESC 退出支持
  */
@@ -15,13 +14,6 @@ import { CanvasImage, Point, Viewport, ExpandOffsets } from '../types';
 import { generateExpandedImage, getImageNaturalDimensions } from '../utils/canvasUtils';
 
 // ==================== 类型定义 ====================
-
-interface SmartGuide {
-  type: 'equal' | 'near'; // 相等或接近
-  edges: string[]; // 相关的边（如 ['top', 'bottom']）
-  distance: number; // 相等的距离值
-  timestamp: number; // 添加时间戳，用于延迟消失
-}
 
 type ExpandHandleType = 
   | 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right'  // 四角
@@ -41,14 +33,6 @@ interface ExpandModeProps {
   /** Ctrl 键是否按下（从父组件传入以保持同步） */
   ctrlKeyPressed?: boolean;
 }
-
-// ==================== 常量 ====================
-
-/** 磁吸阈值（像素）：当距离差小于此值时自动对齐 */
-const SNAP_THRESHOLD = 5;
-
-/** 辅助线延迟消失时间（毫秒）：拖动停止后保持显示的时间 */
-const GUIDE_FADE_DELAY = 500;
 
 // ==================== 组件 ====================
 
@@ -71,7 +55,6 @@ const ExpandMode: React.FC<ExpandModeProps> = ({
   const [expandStartOffsets, setExpandStartOffsets] = useState<ExpandOffsets>({ 
     top: 0, right: 0, bottom: 0, left: 0 
   });
-  const [smartGuides, setSmartGuides] = useState<SmartGuide[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
   
   // 原始图片尺寸（用于显示真实像素尺寸）
@@ -102,55 +85,6 @@ const ExpandMode: React.FC<ExpandModeProps> = ({
     };
   }, [viewport, image]);
 
-  /** 检测智能辅助线 */
-  const detectSmartGuides = useCallback((offsets: ExpandOffsets, draggingEdge: string): SmartGuide[] => {
-    const guides: SmartGuide[] = [];
-    const edges = ['top', 'right', 'bottom', 'left'] as const;
-    const edgeValues = {
-      top: offsets.top,
-      right: offsets.right,
-      bottom: offsets.bottom,
-      left: offsets.left
-    };
-    
-    const currentValue = edgeValues[draggingEdge as keyof typeof edgeValues];
-    
-    // 如果当前值为0或太小，不显示辅助线
-    if (currentValue < 1) {
-      return guides;
-    }
-
-    // 检测与其他边的相等关系
-    for (const edge of edges) {
-      if (edge === draggingEdge) continue;
-      
-      const otherValue = edgeValues[edge];
-      if (otherValue < 1) continue;
-      
-      const diff = Math.abs(currentValue - otherValue);
-      
-      if (diff < 1) {
-        // 完全相等
-        guides.push({
-          type: 'equal',
-          edges: [draggingEdge, edge],
-          distance: currentValue,
-          timestamp: Date.now()
-        });
-      } else if (diff <= SNAP_THRESHOLD) {
-        // 接近相等（在磁吸阈值内）
-        guides.push({
-          type: 'near',
-          edges: [draggingEdge, edge],
-          distance: otherValue,
-          timestamp: Date.now()
-        });
-      }
-    }
-
-    return guides;
-  }, []);
-
   /** 生成扩展后的图片 */
   const generateExpandedImageLocal = useCallback(async (): Promise<string> => {
     // 获取图片的原始尺寸
@@ -179,7 +113,6 @@ const ExpandMode: React.FC<ExpandModeProps> = ({
     setDraggingHandleType(handleType);
     setDragStartPoint({ x: e.clientX, y: e.clientY });
     setExpandStartOffsets({ ...expandOffsets });
-    setSmartGuides([]);
   }, [expandOffsets]);
 
   // 拖动处理 effect
@@ -318,56 +251,12 @@ const ExpandMode: React.FC<ExpandModeProps> = ({
           break;
       }
 
-      // 智能辅助线检测和磁吸
-      const detectedGuides: SmartGuide[] = [];
-      
-      if (['top-left', 'top-right', 'top', 'bottom-left', 'bottom-right', 'bottom'].includes(draggingHandleType)) {
-        if (['top-left', 'top-right', 'top'].includes(draggingHandleType)) {
-          detectedGuides.push(...detectSmartGuides(newOffsets, 'top'));
-        }
-        if (['bottom-left', 'bottom-right', 'bottom'].includes(draggingHandleType)) {
-          detectedGuides.push(...detectSmartGuides(newOffsets, 'bottom'));
-        }
-      }
-      
-      if (['top-left', 'bottom-left', 'left', 'top-right', 'bottom-right', 'right'].includes(draggingHandleType)) {
-        if (['top-left', 'bottom-left', 'left'].includes(draggingHandleType)) {
-          detectedGuides.push(...detectSmartGuides(newOffsets, 'left'));
-        }
-        if (['top-right', 'bottom-right', 'right'].includes(draggingHandleType)) {
-          detectedGuides.push(...detectSmartGuides(newOffsets, 'right'));
-        }
-      }
-
-      // 应用磁吸效果
-      for (const guide of detectedGuides) {
-        if (guide.type === 'near') {
-          const [edge1, edge2] = guide.edges;
-          const targetEdge = edge1 === draggingHandleType || 
-            (draggingHandleType.includes(edge1)) ? edge1 : edge2;
-          
-          if (targetEdge === 'top') newOffsets.top = guide.distance;
-          else if (targetEdge === 'right') newOffsets.right = guide.distance;
-          else if (targetEdge === 'bottom') newOffsets.bottom = guide.distance;
-          else if (targetEdge === 'left') newOffsets.left = guide.distance;
-        }
-      }
-
-      // 去重并更新辅助线
-      const uniqueGuides = detectedGuides.filter((guide, index, self) => {
-        const guideKey = guide.edges.sort().join('-');
-        return index === self.findIndex(g => g.edges.sort().join('-') === guideKey);
-      }).map(guide => ({ ...guide, timestamp: Date.now() }));
-      
-      setSmartGuides(uniqueGuides);
       setExpandOffsets(newOffsets);
     };
 
     const handleMouseUp = () => {
       setIsDragging(false);
       setDraggingHandleType(null);
-      // 延迟清除辅助线
-      setTimeout(() => setSmartGuides([]), GUIDE_FADE_DELAY);
     };
 
     document.addEventListener('mousemove', handleMouseMove);
@@ -377,7 +266,7 @@ const ExpandMode: React.FC<ExpandModeProps> = ({
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [isDragging, draggingHandleType, dragStartPoint, expandStartOffsets, viewport, image, containerRef, detectSmartGuides]);
+  }, [isDragging, draggingHandleType, dragStartPoint, expandStartOffsets, viewport, image, containerRef]);
 
   // ==================== 键盘事件 ====================
 
@@ -454,7 +343,6 @@ const ExpandMode: React.FC<ExpandModeProps> = ({
     if (isDragging) {
       setIsDragging(false);
       setDraggingHandleType(null);
-      setTimeout(() => setSmartGuides([]), GUIDE_FADE_DELAY);
     }
   }, [isDragging]);
 
@@ -496,69 +384,6 @@ const ExpandMode: React.FC<ExpandModeProps> = ({
           onMouseDown={(e) => handleMouseDown(e, type)}
         />
       ))}
-
-      {/* 智能辅助线 */}
-      {smartGuides.map((guide, index) => {
-        const edges = guide.edges.sort();
-        const edgeKey = edges.join('-');
-        
-        if (edgeKey === 'bottom-top') {
-          return (
-            <React.Fragment key={`guide-${index}`}>
-              <div
-                className="absolute pointer-events-none"
-                style={{
-                  left: 0,
-                  top: expandedTop,
-                  width: canvasWidth,
-                  height: 1,
-                  backgroundColor: '#FF0000',
-                  zIndex: 100,
-                }}
-              />
-              <div
-                className="absolute pointer-events-none"
-                style={{
-                  left: 0,
-                  top: expandedBottom,
-                  width: canvasWidth,
-                  height: 1,
-                  backgroundColor: '#FF0000',
-                  zIndex: 100,
-                }}
-              />
-            </React.Fragment>
-          );
-        } else if (edgeKey === 'left-right') {
-          return (
-            <React.Fragment key={`guide-${index}`}>
-              <div
-                className="absolute pointer-events-none"
-                style={{
-                  left: expandedLeft,
-                  top: 0,
-                  width: 1,
-                  height: canvasHeight,
-                  backgroundColor: '#FF0000',
-                  zIndex: 100,
-                }}
-              />
-              <div
-                className="absolute pointer-events-none"
-                style={{
-                  left: expandedRight,
-                  top: 0,
-                  width: 1,
-                  height: canvasHeight,
-                  backgroundColor: '#FF0000',
-                  zIndex: 100,
-                }}
-              />
-            </React.Fragment>
-          );
-        }
-        return null;
-      })}
 
       {/* 尺寸信息显示 - 基于原始图片像素尺寸 */}
       {hasExpansion && naturalDims && (() => {
@@ -609,7 +434,6 @@ const ExpandMode: React.FC<ExpandModeProps> = ({
           if (isDragging) {
             setIsDragging(false);
             setDraggingHandleType(null);
-            setTimeout(() => setSmartGuides([]), GUIDE_FADE_DELAY);
           }
         }}
       >
