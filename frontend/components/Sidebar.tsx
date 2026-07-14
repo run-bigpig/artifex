@@ -1114,13 +1114,18 @@ const Sidebar: React.FC<SidebarProps> = ({
 
                   {/* Edit/Reuse Button */}
                   {msg.role === 'user' && (
-                    <button 
-                      onClick={() => handleReusePrompt(msg.text, msg.images)}
-                      className="absolute -left-10 top-1/2 -translate-y-1/2 p-2 rounded-full bg-slate-800/80 text-slate-400 hover:text-white hover:bg-slate-700 opacity-0 group-hover/message:opacity-100 transition-all transform hover:scale-110"
-                      title="重新编辑"
-                    >
-                      <Edit2 size={14} />
-                    </button>
+                    <div className="flex justify-center mt-2">
+                      <button
+                        type="button"
+                        onClick={() => handleReusePrompt(msg.text, msg.images)}
+                        className="inline-flex min-h-10 min-w-[96px] items-center justify-center gap-2 rounded-full border border-blue-400/50 bg-blue-500/15 px-4 py-2 text-xs font-semibold text-blue-200 shadow-lg shadow-blue-950/30 transition-all hover:border-blue-300 hover:bg-blue-500 hover:text-white hover:shadow-blue-900/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950 active:scale-95"
+                        title="重新编辑这条消息"
+                        aria-label="重新编辑这条消息"
+                      >
+                        <Edit2 size={15} aria-hidden="true" />
+                        <span>重新编辑</span>
+                      </button>
+                    </div>
                   )}
                 </div>
                 
