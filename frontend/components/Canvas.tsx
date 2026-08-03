@@ -1781,10 +1781,12 @@ const Canvas: React.FC<CanvasProps> = ({
                 draggable={false}
               />
               
-              {/* Info Badge */}
-              <div className="absolute bottom-0 left-0 right-0 bg-black/60 text-xs text-white p-1 opacity-0 group-hover:opacity-100 transition-opacity truncate pointer-events-none">
-                {img.prompt}
-              </div>
+              {/* 导入图片没有生成提示词，不显示占位信息 */}
+              {img.prompt && img.prompt !== '导入的图片' && (
+                <div className="absolute bottom-0 left-0 right-0 bg-black/60 text-xs text-white p-1 opacity-0 group-hover:opacity-100 transition-opacity truncate pointer-events-none">
+                  {img.prompt}
+                </div>
+              )}
             </div>
           );
         })}

@@ -56,7 +56,6 @@ func (a *AIService) Startup(ctx context.Context) {
 	}
 }
 
-
 // ==================== 提供商管理方法 ====================
 
 // RegisterProvider 注册提供商
@@ -249,7 +248,6 @@ func (a *AIService) GenerateImage(paramsJSON string, requestID string) (string, 
 	return a.storeImageResult(result)
 }
 
-
 // EditMultiImages 编辑图像（支持单图或多图）
 // 统一使用多图编辑方法，即使只有一张图也使用此方法
 // requestID: 请求 ID，用于管理 context 和取消请求
@@ -290,7 +288,6 @@ func (a *AIService) EditMultiImages(paramsJSON string, requestID string) (string
 	return a.storeImageResult(result)
 }
 
-
 // RemoveBackground 移除背景
 // requestID: 请求 ID，用于管理 context 和取消请求
 func (a *AIService) RemoveBackground(imageData string, requestID string) (string, error) {
@@ -327,14 +324,21 @@ func (a *AIService) RemoveBackground(imageData string, requestID string) (string
 	return a.storeImageResult(result)
 }
 
-
-// EnhancePrompt 增强提示词
-// paramsJSON: JSON 格式的 EnhancePromptParams，包含 prompt 和可选的 referenceImages
-// requestID: 请求 ID，用于管理 context 和取消请求
-func (a *AIService) EnhancePrompt(paramsJSON string, requestID string) (string, error) {
-	var params types.EnhancePromptParams
+func (a *AIService) RecognizeIntent(paramsJSON string, requestID string) (string, error) {
+	var params types.IntentRecognitionParams
 	if err := json.Unmarshal([]byte(paramsJSON), &params); err != nil {
 		return "", fmt.Errorf("invalid parameters: %w", err)
+	}
+	params.Message = strings.TrimSpace(params.Message)
+	if params.Message == "" && len(params.ReferenceImages) == 0 {
+		return "", fmt.Errorf("message or referenceImages is required")
+	}
+	if len(params.ReferenceImages) > 0 {
+		normalizedImages, err := a.normalizeImageInputs(params.ReferenceImages)
+		if err != nil {
+			return "", err
+		}
+		params.ReferenceImages = normalizedImages
 	}
 
 	reqCtx, err := a.contextManager.CreateRequestContext(requestID)
@@ -342,31 +346,16 @@ func (a *AIService) EnhancePrompt(paramsJSON string, requestID string) (string, 
 		return "", fmt.Errorf("failed to create request context: %w", err)
 	}
 	defer a.contextManager.CleanupRequest(requestID)
-
 	aiProvider, err := a.getCurrentProvider()
 	if err != nil {
 		return "", err
 	}
-
-	caps := aiProvider.GetCapabilities()
-	if !caps.EnhancePrompt {
-		return "", fmt.Errorf("aiProvider %s does not support prompt enhancement", aiProvider.Name())
+	recognizer, ok := aiProvider.(provider.IntentRecognizer)
+	if !ok {
+		return "", fmt.Errorf("aiProvider %s does not support intent recognition", aiProvider.Name())
 	}
-
-	if len(params.ReferenceImages) > 0 && !caps.ReferenceImage {
-		return "", fmt.Errorf("aiProvider %s does not support reference images for prompt enhancement", aiProvider.Name())
-	}
-
-	if len(params.ReferenceImages) > 0 {
-		params.ReferenceImages, err = a.normalizeImageInputs(params.ReferenceImages)
-		if err != nil {
-			return "", err
-		}
-	}
-
-	return aiProvider.EnhancePrompt(reqCtx, params)
+	return recognizer.RecognizeIntent(reqCtx, params)
 }
-
 
 // CancelRequest 取消指定请求
 func (a *AIService) normalizeImageInput(imageData string) (string, error) {

@@ -4,13 +4,13 @@
  * 此模块提供了与 Go 后端 AI 服务通信的统一接口，封装了所有 AI 相关的功能：
  * - 图像生成
  * - 图像编辑（单图和多图）
- * - 提示词增强
+ * - 意图识别
  * 
  * API Key 和配置管理由 Go 后端统一处理。
  */
 
-import { GenerateImage, EditMultiImages, EnhancePrompt, CancelAIRequest } from '../wailsjs/go/core/App';
-import { ModelSettings } from '../types';
+import { GenerateImage, EditMultiImages, RecognizeIntent, CancelAIRequest } from '../wailsjs/go/core/App';
+import { IntentOption, ModelSettings, ThinkingLevel } from '../types';
 
 // ==================== 请求 ID 生成 ====================
 
@@ -88,6 +88,7 @@ interface GenerateImageParams {
   sketchImage?: string; // data URL 草图图像
   imageSize: string; // "1K", "2K", "4K"
   aspectRatio: string; // "1:1", "16:9", "9:16", "3:4", "4:3"
+  thinkingLevel: ThinkingLevel;
 }
 
 /**
@@ -98,14 +99,15 @@ interface MultiImageEditParams {
   prompt: string; // 编辑提示词
   imageSize?: string; // 图片尺寸，可选值："1K", "2K", "4K"（可选）
   aspectRatio?: string; // 宽高比，可选值："1:1", "16:9", "9:16", "3:4", "4:3"（可选）
+  thinkingLevel: ThinkingLevel;
 }
 
 /**
- * 增强提示词参数接口（与 Go 后端 EnhancePromptParams 对应）
+ * 意图识别参数接口（与 Go 后端 IntentRecognitionParams 对应）
  */
-interface EnhancePromptParams {
-  prompt: string;
-  referenceImages?: string[]; // data URL 参考图像数组（可选）
+interface IntentRecognitionParams {
+  message: string;
+  referenceImages?: string[];
 }
 
 // ==================== 图像生成 ====================
@@ -116,6 +118,7 @@ interface EnhancePromptParams {
  * @param settings 模型设置（可选）
  * @param referenceImage 可选的参考图像（data URL）
  * @param sketchImage 可选的草图图像（data URL）
+ * @param thinkingLevel 图像模型档位
  * @param requestID 请求 ID（可选，如果不提供会自动生成）
  * @returns image ref URL
  * @throws 如果生成失败会抛出错误
@@ -125,6 +128,7 @@ export const generateImage = async (
   settings?: ModelSettings,
   referenceImage?: string,
   sketchImage?: string,
+  thinkingLevel: ThinkingLevel = 'medium',
   requestID?: string
 ): Promise<string> => {
   try {
@@ -132,6 +136,7 @@ export const generateImage = async (
       prompt,
       imageSize: settings?.imageSize || '1K',
       aspectRatio: settings?.aspectRatio || '1:1',
+      thinkingLevel,
     };
 
     if (referenceImage) {
@@ -157,17 +162,19 @@ export const generateImage = async (
  * @param settings 模型设置（可选）
  * @param referenceImage 可选的参考图像（data URL）
  * @param sketchImage 可选的草图图像（data URL）
+ * @param thinkingLevel 图像模型档位
  * @returns 可取消的请求对象
  */
 export const generateImageCancellable = (
   prompt: string,
   settings?: ModelSettings,
   referenceImage?: string,
-  sketchImage?: string
+  sketchImage?: string,
+  thinkingLevel: ThinkingLevel = 'medium'
 ): CancellableRequest<string> => {
   const requestID = generateRequestID();
   return createCancellableRequest(
-    () => generateImage(prompt, settings, referenceImage, sketchImage, requestID),
+    () => generateImage(prompt, settings, referenceImage, sketchImage, thinkingLevel, requestID),
     requestID
   );
 };
@@ -182,6 +189,7 @@ export const generateImageCancellable = (
  * @param prompt 编辑提示词
  * @param imageSize 图片尺寸，可选值："1K", "2K", "4K"（可选，仅 Gemini Provider 支持）
  * @param aspectRatio 宽高比，可选值："1:1", "16:9", "9:16", "3:4", "4:3"（可选，仅 Gemini Provider 支持）
+ * @param thinkingLevel 图像模型档位
  * @param requestID 请求 ID（可选，如果不提供会自动生成）
  * @returns image ref URL
  * @throws 如果编辑失败会抛出错误
@@ -191,6 +199,7 @@ export const editMultiImages = async (
   prompt: string,
   imageSize?: string,
   aspectRatio?: string,
+  thinkingLevel: ThinkingLevel = 'medium',
   requestID?: string
 ): Promise<string> => {
   try {
@@ -202,6 +211,7 @@ export const editMultiImages = async (
     const params: MultiImageEditParams = {
       images: base64Images,
       prompt: prompt,
+      thinkingLevel,
     };
 
     // 如果提供了 ImageSize 或 AspectRatio，添加到参数中
@@ -228,70 +238,60 @@ export const editMultiImages = async (
  * @param prompt 编辑提示词
  * @param imageSize 图片尺寸，可选值："1K", "2K", "4K"（可选）
  * @param aspectRatio 宽高比，可选值："1:1", "16:9", "9:16", "3:4", "4:3"（可选）
+ * @param thinkingLevel 图像模型档位
  * @returns 可取消的请求对象
  */
 export const editMultiImagesCancellable = (
   base64Images: string[],
   prompt: string,
   imageSize?: string,
-  aspectRatio?: string
+  aspectRatio?: string,
+  thinkingLevel: ThinkingLevel = 'medium'
 ): CancellableRequest<string> => {
   const requestID = generateRequestID();
   return createCancellableRequest(
-    () => editMultiImages(base64Images, prompt, imageSize, aspectRatio, requestID),
+    () => editMultiImages(base64Images, prompt, imageSize, aspectRatio, thinkingLevel, requestID),
     requestID
   );
 };
 
-// ==================== 提示词增强 ====================
-
-/**
- * 增强提示词
- * 支持基于参考图像的提示词增强，AI 会分析参考图像的视觉风格、光照、构图等特征。
- * 
- * @param prompt 原始提示词
- * @param referenceImages 可选的参考图像数组（data URL）
- * @param requestID 请求 ID（可选，如果不提供会自动生成）
- * @returns 增强后的提示词。如果增强失败，返回原始提示词
- */
-export const enhancePrompt = async (
-  prompt: string,
-  referenceImages?: string[],
+export const recognizeIntent = async (
+  message: string,
+  referenceImages: string[],
   requestID?: string
-): Promise<string> => {
-  try {
-    const params: EnhancePromptParams = {
-      prompt,
-    };
-
-    if (referenceImages && referenceImages.length > 0) {
-      params.referenceImages = referenceImages;
-    }
-
-    const paramsJSON = JSON.stringify(params);
-    const reqID = requestID || generateRequestID();
-    return await EnhancePrompt(paramsJSON, reqID);
-  } catch (error) {
-    console.error("Prompt enhancement failed", error);
-    // 如果增强失败，返回原始提示词（保持向后兼容）
-    return prompt;
+): Promise<IntentOption[]> => {
+  const params: IntentRecognitionParams = { message };
+  if (referenceImages.length > 0) {
+    params.referenceImages = referenceImages;
   }
+  const paramsJSON = JSON.stringify(params);
+  const reqID = requestID || generateRequestID();
+  const rawResponse = await RecognizeIntent(paramsJSON, reqID);
+  const response = JSON.parse(rawResponse) as { intents?: unknown };
+  if (!Array.isArray(response.intents)) {
+    throw new Error('Intent recognition returned an invalid response');
+  }
+  const intents = response.intents.filter((item): item is IntentOption => {
+    if (!item || typeof item !== 'object') return false;
+    const option = item as Partial<IntentOption>;
+    return typeof option.title === 'string'
+      && typeof option.prompt === 'string'
+      && typeof option.description === 'string'
+      && option.prompt.trim().length > 0;
+  });
+  if (intents.length < 3 || intents.length > 5) {
+    throw new Error('Intent recognition must return 3 to 5 candidates');
+  }
+  return intents;
 };
 
-/**
- * 增强提示词（可取消版本）
- * @param prompt 原始提示词
- * @param referenceImages 可选的参考图像数组（data URL）
- * @returns 可取消的请求对象
- */
-export const enhancePromptCancellable = (
-  prompt: string,
-  referenceImages?: string[]
-): CancellableRequest<string> => {
+export const recognizeIntentCancellable = (
+  message: string,
+  referenceImages: string[]
+): CancellableRequest<IntentOption[]> => {
   const requestID = generateRequestID();
   return createCancellableRequest(
-    () => enhancePrompt(prompt, referenceImages, requestID),
+    () => recognizeIntent(message, referenceImages, requestID),
     requestID
   );
 };
-

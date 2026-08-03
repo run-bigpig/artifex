@@ -1,9 +1,8 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
-import { ChatMessage, CanvasImage, Attachment, ModelSettings, AspectRatio, ImageSize, MessageType } from '../types';
-import { Send, Bot, Sparkles, X, Paperclip, Edit2, Wand2, Loader2, Monitor, Square, RectangleHorizontal, RectangleVertical, Image, Trash2, Square as StopIcon } from 'lucide-react';
-import { 
-  enhancePrompt, 
-  enhancePromptCancellable,
+import { ChatMessage, CanvasImage, Attachment, ModelSettings, AspectRatio, ImageSize, IntentOption, MessageType, ThinkingLevel } from '../types';
+import { Send, Bot, X, Paperclip, Edit2, Loader2, Monitor, Square, RectangleHorizontal, RectangleVertical, Image, Trash2, ScanSearch, Square as StopIcon } from 'lucide-react';
+import {
+  recognizeIntentCancellable,
   CancellableRequest,
   generateImageCancellable,
   editMultiImagesCancellable
@@ -11,6 +10,8 @@ import {
 import { loadChatHistory, saveChatHistory, clearChatHistory, flushChatHistory } from '../services/historyService';
 import { storeImage } from '../services/imageService';
 import ConfirmDialog from './ConfirmDialog';
+import IntentOptionsPanel from './IntentOptionsPanel';
+import ThinkingLevelPicker from './ThinkingLevelPicker';
 import { ensureDataUrl, isDataUrl, isImageRef, normalizeImageSrc, toImageRef } from '../utils/imageSource';
 
 interface SidebarProps {
@@ -67,12 +68,16 @@ const Sidebar: React.FC<SidebarProps> = ({
   const [loadedImages, setLoadedImages] = useState<Set<string>>(new Set());
   
   const [isDragging, setIsDragging] = useState(false);
-  const [isEnhancing, setIsEnhancing] = useState(false);
+  const [isRecognizingIntent, setIsRecognizingIntent] = useState(false);
+  const [intentOptions, setIntentOptions] = useState<IntentOption[]>([]);
+  const [intentError, setIntentError] = useState('');
   const [showResPicker, setShowResPicker] = useState(false);
+  const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>('medium');
   
   // 请求状态管理
   const [currentRequest, setCurrentRequest] = useState<CancellableRequest<string> | null>(null);
-  const [currentEnhanceRequest, setCurrentEnhanceRequest] = useState<CancellableRequest<string> | null>(null);
+  const currentIntentRequestRef = useRef<CancellableRequest<IntentOption[]> | null>(null);
+  const intentRequestVersionRef = useRef(0);
   const [isRequestActive, setIsRequestActive] = useState(false);
   const currentLoadingIdRef = useRef<string | null>(null); // 当前加载消息的 ID
   
@@ -471,6 +476,23 @@ const Sidebar: React.FC<SidebarProps> = ({
     .map(resolveAttachment)
     .filter((a): a is { id: string, src: string } => a !== null);
 
+  const intentContextFingerprint = useMemo(
+    () => `${inputValue}\u0000${attachments.map((att) => `${att.id}:${att.type}:${att.content}`).join('\u0000')}`,
+    [inputValue, attachments]
+  );
+  const previousIntentContextFingerprintRef = useRef(intentContextFingerprint);
+
+  useEffect(() => {
+    if (previousIntentContextFingerprintRef.current === intentContextFingerprint) return;
+    previousIntentContextFingerprintRef.current = intentContextFingerprint;
+    intentRequestVersionRef.current += 1;
+    currentIntentRequestRef.current?.abort();
+    currentIntentRequestRef.current = null;
+    setIsRecognizingIntent(false);
+    setIntentOptions([]);
+    setIntentError('');
+  }, [intentContextFingerprint]);
+
   const resolveAttachmentDataUrls = async (): Promise<string[]> => {
     if (resolvedAttachments.length === 0) {
       return [];
@@ -649,6 +671,8 @@ const Sidebar: React.FC<SidebarProps> = ({
 
   const handleReusePrompt = (text: string, msgImages?: string[]) => {
     setInputValue(text);
+    setIntentOptions([]);
+    setIntentError('');
     if (msgImages && msgImages.length > 0) {
       const recoveredAttachments: Attachment[] = msgImages.map((src) => {
         const normalized = toImageRef(src);
@@ -660,6 +684,60 @@ const Sidebar: React.FC<SidebarProps> = ({
       });
       setAttachments(recoveredAttachments);
     }
+    textareaRef.current?.focus();
+  };
+
+  const closeIntentOptions = () => {
+    intentRequestVersionRef.current += 1;
+    currentIntentRequestRef.current?.abort();
+    currentIntentRequestRef.current = null;
+    setIsRecognizingIntent(false);
+    setIntentOptions([]);
+    setIntentError('');
+  };
+
+  const handleRecognizeIntent = async () => {
+    if ((!inputValue.trim() && resolvedAttachments.length === 0) || isRecognizingIntent || isRequestActive) return;
+    currentIntentRequestRef.current?.abort();
+    const requestVersion = intentRequestVersionRef.current + 1;
+    intentRequestVersionRef.current = requestVersion;
+    setIntentOptions([]);
+    setIntentError('');
+    setIsRecognizingIntent(true);
+
+    let request: CancellableRequest<IntentOption[]> | null = null;
+    try {
+      const referenceImages = await resolveAttachmentDataUrls();
+      if (intentRequestVersionRef.current !== requestVersion) return;
+      request = recognizeIntentCancellable(inputValue.trim(), referenceImages);
+      currentIntentRequestRef.current = request;
+      const options = await request.promise;
+      if (!request.isAborted() && intentRequestVersionRef.current === requestVersion) {
+        setIntentOptions(options);
+      }
+    } catch (error: any) {
+      if (
+        intentRequestVersionRef.current === requestVersion
+        && !request?.isAborted()
+        && error?.message !== 'Request was cancelled'
+      ) {
+        console.error('Intent recognition failed', error);
+        setIntentError('暂时无法识别意图，请稍后重试。');
+      }
+    } finally {
+      if (intentRequestVersionRef.current === requestVersion) {
+        setIsRecognizingIntent(false);
+        if (currentIntentRequestRef.current === request) {
+          currentIntentRequestRef.current = null;
+        }
+      }
+    }
+  };
+
+  const handleSelectIntent = (option: IntentOption) => {
+    setInputValue(option.prompt);
+    setIntentOptions([]);
+    setIntentError('');
     textareaRef.current?.focus();
   };
 
@@ -684,47 +762,6 @@ const Sidebar: React.FC<SidebarProps> = ({
     } catch (error) {
       console.error('Failed to add reference image:', error);
       addMessage('model', '参考图添加失败，请重试。', 'error');
-    }
-  };
-
-  // --- Prompt Enhancement ---
-  const handleEnhancePrompt = async () => {
-    // Allow enhance if there is text OR attachments
-    // 不允许在请求进行中或正在优化时执行
-    if ((!inputValue.trim() && resolvedAttachments.length === 0) || isEnhancing || isRequestActive) return;
-    
-    // 如果已有增强请求在进行中，取消它
-    if (currentEnhanceRequest) {
-      currentEnhanceRequest.abort();
-      setCurrentEnhanceRequest(null);
-    }
-    
-    setIsEnhancing(true);
-    try {
-      const currentBase64s = await resolveAttachmentDataUrls();
-      // 使用可取消的增强方法
-      const enhanceRequest = enhancePromptCancellable(inputValue, currentBase64s);
-      setCurrentEnhanceRequest(enhanceRequest);
-      
-      const enhancedText = await enhanceRequest.promise;
-      
-      // 检查请求是否已被取消
-      if (enhanceRequest.isAborted()) {
-        return;
-      }
-      
-      setInputValue(enhancedText);
-    } catch (err: any) {
-      // 检查是否是取消错误
-      if (err?.message === 'Request was cancelled' || currentEnhanceRequest?.isAborted()) {
-        return;
-      }
-      console.error("Enhance failed", err);
-      // Optional: show toast
-    } finally {
-      setIsEnhancing(false);
-      setCurrentEnhanceRequest(null);
-      textareaRef.current?.focus();
     }
   };
 
@@ -762,11 +799,11 @@ const Sidebar: React.FC<SidebarProps> = ({
       }
     }
     
-    // 取消增强请求
-    if (currentEnhanceRequest) {
-      currentEnhanceRequest.abort();
-      setCurrentEnhanceRequest(null);
-      setIsEnhancing(false);
+    if (currentIntentRequestRef.current) {
+      intentRequestVersionRef.current += 1;
+      currentIntentRequestRef.current.abort();
+      currentIntentRequestRef.current = null;
+      setIsRecognizingIntent(false);
     }
   };
 
@@ -806,6 +843,8 @@ const Sidebar: React.FC<SidebarProps> = ({
         return;
       }
       setInputValue('');
+      setIntentOptions([]);
+      setIntentError('');
 
       // 1. Add User Message
       addMessage('user', currentInput, 'text', currentImageRefs);
@@ -833,7 +872,8 @@ const Sidebar: React.FC<SidebarProps> = ({
           currentBase64s,
           currentInput,
           modelSettings.imageSize || undefined,
-          modelSettings.aspectRatio || undefined
+          modelSettings.aspectRatio || undefined,
+          thinkingLevel
         );
       } else {
         // Generate Mode - 使用可取消的生成方法
@@ -841,7 +881,8 @@ const Sidebar: React.FC<SidebarProps> = ({
           currentInput,
           modelSettings,
           undefined, // referenceImage
-          undefined  // sketchImage
+          undefined, // sketchImage
+          thinkingLevel
         );
       }
       
@@ -910,6 +951,9 @@ const Sidebar: React.FC<SidebarProps> = ({
       if (submitDebounceRef.current) {
         clearTimeout(submitDebounceRef.current);
       }
+      intentRequestVersionRef.current += 1;
+      currentIntentRequestRef.current?.abort();
+      currentIntentRequestRef.current = null;
     };
   }, []);
 
@@ -1140,6 +1184,13 @@ const Sidebar: React.FC<SidebarProps> = ({
           {/* Input Area */}
           <div className="p-5 bg-slate-950 border-t border-slate-800 z-20">
             <form onSubmit={handleSubmit} className="relative group/input">
+              <IntentOptionsPanel
+                options={intentOptions}
+                isLoading={isRecognizingIntent}
+                error={intentError}
+                onSelect={handleSelectIntent}
+                onClose={closeIntentOptions}
+              />
               
               <div
                 onDrop={handleDrop}
@@ -1173,7 +1224,13 @@ const Sidebar: React.FC<SidebarProps> = ({
                 <textarea
                   ref={textareaRef}
                   value={inputValue}
-                  onChange={(e) => setInputValue(e.target.value)}
+                  onChange={(e) => {
+                    setInputValue(e.target.value);
+                    if (intentOptions.length > 0 || intentError) {
+                      setIntentOptions([]);
+                      setIntentError('');
+                    }
+                  }}
                   onPaste={handlePaste}
                   placeholder={
                     resolvedAttachments.length > 0
@@ -1310,35 +1367,42 @@ const Sidebar: React.FC<SidebarProps> = ({
                                     ))}
                                   </div>
                                   <p className="text-[10px] text-slate-500 mt-2 px-1">
-                                    注意: 2K/4K 分辨率将使用 Gemini 3 Pro 模型，消耗更多资源。
+                                    2K/4K 会消耗更多资源；模型档位由思考强度控制。
                                   </p>
                                 </div>
                               </div>
                             )}
                          </div>
+
+                         <ThinkingLevelPicker
+                           value={thinkingLevel}
+                           onChange={setThinkingLevel}
+                           disabled={isRequestActive}
+                         />
                        </>
                      )}
                   </div>
 
-                  {/* Right Actions (Enhance, Send) */}
-                  <div className="flex items-center gap-3">
+                  {/* Right Actions (Intent, Send) */}
+                  <div className="flex items-center gap-2">
                      {(inputValue.trim().length > 0 || resolvedAttachments.length > 0) && (
                       <button
                         type="button"
-                        onClick={handleEnhancePrompt}
-                        disabled={isEnhancing || isRequestActive}
-                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all border
-                          ${isEnhancing || isRequestActive
-                            ? 'bg-purple-900/20 text-purple-400 border-purple-500/30 cursor-wait opacity-50' 
-                            : 'bg-purple-500/5 text-purple-400 border-purple-500/20 hover:bg-purple-500/10 hover:border-purple-500/40 hover:text-purple-300'
-                          }`}
-                        title={isRequestActive ? '请求进行中，无法优化' : 'AI 提示词增强'}
+                        onClick={handleRecognizeIntent}
+                        disabled={isRecognizingIntent || isRequestActive}
+                        className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1.5 text-xs font-medium transition-all ${
+                          isRecognizingIntent
+                            ? 'cursor-wait border-cyan-500/30 bg-cyan-900/20 text-cyan-300'
+                            : 'border-cyan-500/20 bg-cyan-500/5 text-cyan-400 hover:border-cyan-500/40 hover:bg-cyan-500/10 hover:text-cyan-300'
+                        } disabled:opacity-50`}
+                        title="结合当前文本和参考图识别可能意图"
                       >
-                        {isEnhancing ? <Sparkles size={14} className="animate-spin" /> : <Wand2 size={14} />}
-                        <span>{isEnhancing ? '优化中...' : '优化'}</span>
+                        {isRecognizingIntent
+                          ? <Loader2 size={14} className="animate-spin" />
+                          : <ScanSearch size={14} />}
+                        <span>意图</span>
                       </button>
                      )}
-
                     <button
                       type="submit"
                       disabled={(!inputValue.trim() && resolvedAttachments.length === 0) && !isRequestActive}

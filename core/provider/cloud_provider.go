@@ -18,7 +18,6 @@ import (
 var cloudCapabilities = ProviderCapabilities{
 	GenerateImage:    true,
 	EditImage:        true,
-	EnhancePrompt:    true,
 	RemoveBackground: true,
 	ReferenceImage:   true,
 }
@@ -73,28 +72,10 @@ func (p *CloudProvider) CheckAvailability(ctx context.Context) (bool, error) {
 	testCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	// 尝试调用一个简单的 API 来检测服务是否可用
-	// 使用 enhancePrompt 端点进行测试（通常是最轻量的）
-	testRequest := map[string]string{
-		"prompt": "test",
-	}
-
-	requestBody, err := json.Marshal(testRequest)
-	if err != nil {
-		return false, fmt.Errorf("failed to marshal test request: %w", err)
-	}
-
-	// 构建测试 URL（尝试 enhancePrompt 端点）
-	baseURL := strings.TrimSuffix(p.endpointURL, "/")
-	var url string
-	if strings.Contains(baseURL, "/enhancePrompt") {
-		url = baseURL
-	} else {
-		url = fmt.Sprintf("%s/enhancePrompt", baseURL)
-	}
+	url := buildCloudURL(p.endpointURL, "health")
 
 	// 创建 HTTP 请求
-	req, err := http.NewRequestWithContext(testCtx, "POST", url, bytes.NewBuffer(requestBody))
+	req, err := http.NewRequestWithContext(testCtx, "GET", url, nil)
 	if err != nil {
 		return false, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -147,27 +128,15 @@ func (p *CloudProvider) EditMultiImages(ctx context.Context, params types.MultiI
 	return p.callCloudAPI(ctx, "editMultiImages", params)
 }
 
-// EnhancePrompt 增强提示词
-func (p *CloudProvider) EnhancePrompt(ctx context.Context, params types.EnhancePromptParams) (string, error) {
-	// 直接传递 EnhancePromptParams 结构
-	return p.callCloudAPI(ctx, "enhancePrompt", params)
+func (p *CloudProvider) RecognizeIntent(ctx context.Context, params types.IntentRecognitionParams) (string, error) {
+	return p.callCloudAPI(ctx, "recognizeIntent", params)
 }
 
 // ==================== 辅助函数 ====================
 
 // callCloudAPI 调用云服务 API，直接转发参数
 func (p *CloudProvider) callCloudAPI(ctx context.Context, endpoint string, requestData interface{}) (string, error) {
-	// 构建完整的 URL
-	baseURL := strings.TrimSuffix(p.endpointURL, "/")
-	var url string
-	if strings.Contains(baseURL, "/generateImage") || strings.Contains(baseURL, "/editImage") ||
-		strings.Contains(baseURL, "/enhancePrompt") || strings.Contains(baseURL, "/editMultiImages") {
-		// 端点URL已经包含操作路径，直接使用
-		url = baseURL
-	} else {
-		// 附加操作路径
-		url = fmt.Sprintf("%s/%s", baseURL, endpoint)
-	}
+	url := buildCloudURL(p.endpointURL, endpoint)
 
 	// 序列化请求数据
 	requestBody, err := json.Marshal(requestData)
@@ -216,15 +185,15 @@ func (p *CloudProvider) callCloudAPI(ctx context.Context, endpoint string, reque
 
 	// 根据端点类型提取结果
 	switch endpoint {
-	case "enhancePrompt":
-		// 增强提示词返回文本
-		if text, ok := response["text"].(string); ok {
-			return text, nil
+	case "recognizeIntent":
+		var intentResponse types.IntentRecognitionResponse
+		if err := json.Unmarshal(bodyBytes, &intentResponse); err != nil {
+			return "", fmt.Errorf("invalid response format: expected 'intents' field")
 		}
-		if prompt, ok := response["prompt"].(string); ok {
-			return prompt, nil
+		if len(intentResponse.Intents) < 3 || len(intentResponse.Intents) > 5 {
+			return "", fmt.Errorf("invalid response format: expected 3 to 5 intents")
 		}
-		return "", fmt.Errorf("invalid response format: expected 'text' or 'prompt' field")
+		return string(bodyBytes), nil
 	default:
 		// 图像操作返回图像数据（data URI 格式）
 		if imageData, ok := response["image"].(string); ok {
@@ -235,4 +204,12 @@ func (p *CloudProvider) callCloudAPI(ctx context.Context, endpoint string, reque
 		}
 		return "", fmt.Errorf("invalid response format: expected 'image' or 'imageData' field")
 	}
+}
+
+func buildCloudURL(rawURL string, endpoint string) string {
+	baseURL := strings.TrimSuffix(rawURL, "/")
+	for _, operation := range []string{"generateImage", "editImage", "editMultiImages", "recognizeIntent"} {
+		baseURL = strings.TrimSuffix(baseURL, "/"+operation)
+	}
+	return fmt.Sprintf("%s/%s", baseURL, endpoint)
 }

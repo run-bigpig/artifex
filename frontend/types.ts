@@ -41,6 +41,13 @@ export interface Attachment {
 
 export type AspectRatio = "1:1" | "16:9" | "9:16" | "4:3" | "3:4";
 export type ImageSize = "1K" | "2K" | "4K";
+export type ThinkingLevel = 'low' | 'medium' | 'high';
+
+export interface IntentOption {
+  title: string;
+  prompt: string;
+  description: string;
+}
 
 export interface ModelSettings {
   temperature: number;

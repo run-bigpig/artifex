@@ -17,7 +17,6 @@ import (
 var openaiImageAPICapabilities = ProviderCapabilities{
 	GenerateImage:    true,
 	EditImage:        false, // DALL-E 3 不支持，GPT Image 1 需要单独配置
-	EnhancePrompt:    true,
 	RemoveBackground: false,
 	ReferenceImage:   false,
 }
@@ -26,7 +25,6 @@ var openaiImageAPICapabilities = ProviderCapabilities{
 var openaiChatCapabilities = ProviderCapabilities{
 	GenerateImage:    true,
 	EditImage:        true,
-	EnhancePrompt:    true,
 	RemoveBackground: true,
 	ReferenceImage:   true,
 }
@@ -379,96 +377,6 @@ func (p *OpenAIProvider) editMultiImagesViaChat(ctx context.Context, params type
 	}
 
 	return extractImageFromChatResponse(resp)
-}
-
-// ==================== 提示词增强 ====================
-
-// EnhancePrompt 增强提示词
-func (p *OpenAIProvider) EnhancePrompt(ctx context.Context, params types.EnhancePromptParams) (string, error) {
-	// 确定使用的模型
-	model := p.settings.OpenAITextModel
-	if model == "" {
-		model = openai.GPT4
-	}
-
-	// 如果有参考图像，使用支持多模态的模型
-	if len(params.ReferenceImages) > 0 {
-		// 使用支持视觉的模型（如 gpt-4o）
-		if p.settings.OpenAIImageModel != "" {
-			model = p.settings.OpenAIImageModel
-		} else {
-			model = "gpt-4o" // 默认使用支持视觉的模型
-		}
-	}
-
-	// 构建消息内容
-	var multiContent []openai.ChatMessagePart
-
-	// 添加文本提示
-	multiContent = append(multiContent, openai.ChatMessagePart{
-		Type: openai.ChatMessagePartTypeText,
-		Text: "Enhance this prompt: " + params.Prompt,
-	})
-
-	// 如果有参考图像，添加到请求中
-	for i, img := range params.ReferenceImages {
-		imageURL, err := buildImageURL(img)
-		if err != nil {
-			return "", fmt.Errorf("failed to process reference image %d: %w", i, err)
-		}
-		multiContent = append(multiContent, openai.ChatMessagePart{
-			Type: openai.ChatMessagePartTypeImageURL,
-			ImageURL: &openai.ChatMessageImageURL{
-				URL:    imageURL,
-				Detail: openai.ImageURLDetailHigh,
-			},
-		})
-	}
-
-	// 构建系统提示
-	systemContent := "You are an expert AI art prompt engineer. Enhance prompts to be more detailed and effective for image generation. " +
-		"Add details about lighting, style, composition, and mood. " +
-		"If reference images are provided, analyze their visual style, lighting, composition, and subject matter, and incorporate these details into the enhanced prompt. " +
-		"Return ONLY the enhanced prompt without any explanation."
-
-	// 构建聊天请求
-	req := openai.ChatCompletionRequest{
-		Model: model,
-		Messages: []openai.ChatCompletionMessage{
-			{
-				Role:    openai.ChatMessageRoleSystem,
-				Content: systemContent,
-			},
-			{
-				Role:         openai.ChatMessageRoleUser,
-				MultiContent: multiContent,
-			},
-		},
-		Temperature: 0.7,
-		MaxTokens:   500,
-	}
-
-	// 根据配置决定是否使用流式请求
-	if p.settings.OpenAITextStream {
-		return p.createChatCompletionStream(ctx, p.chatClient, req)
-	}
-
-	// 调用 Chat API（使用 chatClient，因为这是文本处理操作）
-	resp, err := p.chatClient.CreateChatCompletion(ctx, req)
-	if err != nil {
-		return "", fmt.Errorf("OpenAI chat API error: %w", err)
-	}
-
-	if len(resp.Choices) == 0 {
-		return params.Prompt, nil
-	}
-
-	enhancedPrompt := resp.Choices[0].Message.Content
-	if enhancedPrompt == "" {
-		return params.Prompt, nil
-	}
-
-	return enhancedPrompt, nil
 }
 
 // ==================== 辅助函数 ====================

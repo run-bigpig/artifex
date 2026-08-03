@@ -61,18 +61,29 @@ type GenerateImageParams struct {
 	SketchImage    string `json:"sketchImage,omitempty"`    // base64 编码的草图图像
 	ImageSize      string `json:"imageSize"`                // "1K", "2K", "4K"
 	AspectRatio    string `json:"aspectRatio"`              // "1:1", "16:9", "9:16", "3:4", "4:3"
+	ThinkingLevel  string `json:"thinkingLevel,omitempty"`  // 思考强度：low、medium、high
 }
 
 // MultiImageEditParams 多图编辑参数
 type MultiImageEditParams struct {
-	Images      []string `json:"images"`                // base64 编码的图像数组（支持单图或多图）
-	Prompt      string   `json:"prompt"`                // 编辑提示词
-	ImageSize   string   `json:"imageSize,omitempty"`   // 图片尺寸，可选值："1K", "2K", "4K"（可选）
-	AspectRatio string   `json:"aspectRatio,omitempty"` // 宽高比，可选值："1:1", "16:9", "9:16", "3:4", "4:3"（可选）
+	Images        []string `json:"images"`                  // base64 编码的图像数组（支持单图或多图）
+	Prompt        string   `json:"prompt"`                  // 编辑提示词
+	ImageSize     string   `json:"imageSize,omitempty"`     // 图片尺寸，可选值："1K", "2K", "4K"（可选）
+	AspectRatio   string   `json:"aspectRatio,omitempty"`   // 宽高比，可选值："1:1", "16:9", "9:16", "3:4", "4:3"（可选）
+	ThinkingLevel string   `json:"thinkingLevel,omitempty"` // 思考强度：low、medium、high
 }
 
-// EnhancePromptParams 增强提示词参数
-type EnhancePromptParams struct {
-	Prompt          string   `json:"prompt"`                    // 原始提示词
-	ReferenceImages []string `json:"referenceImages,omitempty"` // base64 编码的参考图像数组（可选）
+type IntentRecognitionParams struct {
+	Message         string   `json:"message"`
+	ReferenceImages []string `json:"referenceImages,omitempty"`
+}
+
+type IntentOption struct {
+	Title       string `json:"title"`
+	Prompt      string `json:"prompt"`
+	Description string `json:"description"`
+}
+
+type IntentRecognitionResponse struct {
+	Intents []IntentOption `json:"intents"`
 }

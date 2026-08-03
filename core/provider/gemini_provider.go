@@ -19,7 +19,6 @@ import (
 var geminiCapabilities = ProviderCapabilities{
 	GenerateImage:    true,
 	EditImage:        true,
-	EnhancePrompt:    true,
 	RemoveBackground: true,
 	ReferenceImage:   true,
 }
@@ -288,84 +287,6 @@ func (p *GeminiProvider) EditMultiImages(ctx context.Context, params types.Multi
 	}
 
 	return extractImageFromGeminiResponse(response)
-}
-
-// EnhancePrompt 增强提示词
-func (p *GeminiProvider) EnhancePrompt(ctx context.Context, params types.EnhancePromptParams) (string, error) {
-	// 构建请求部分
-	parts := []*genai.Part{
-		{Text: params.Prompt},
-	}
-
-	// 如果有参考图像，添加到请求中
-	for i, img := range params.ReferenceImages {
-		imageData := extractBase64Data(img)
-		decodedData, err := base64.StdEncoding.DecodeString(imageData)
-		if err != nil {
-			return "", fmt.Errorf("failed to decode reference image %d: %w", i, err)
-		}
-
-		parts = append(parts, &genai.Part{
-			InlineData: &genai.Blob{
-				MIMEType: "image/png",
-				Data:     decodedData,
-			},
-		})
-	}
-
-	// 构建增强提示词的系统提示
-	systemInstruction := "You are an expert AI art prompt engineer. Enhance the following prompt to be more detailed and effective for image generation. " +
-		"Add details about lighting, style, composition, and mood. " +
-		"If reference images are provided, analyze their visual style, lighting, composition, and subject matter, and incorporate these details into the enhanced prompt. " +
-		"Return ONLY the enhanced prompt without any explanation."
-
-	content := &genai.Content{
-		Parts: parts,
-		Role:  genai.RoleUser,
-	}
-
-	// 设置生成参数
-	temperature := float32(0.75)
-	topP := float32(0.95)
-
-	// 调用 API（如果有参考图像，使用图像模型；否则使用文本模型）
-	model := p.settings.TextModel
-	if len(params.ReferenceImages) > 0 {
-		// 有参考图像时，使用图像模型以支持多模态输入
-		model = p.settings.ImageModel
-		if model == "" {
-			model = p.settings.TextModel // 回退到文本模型
-		}
-	}
-
-	// 构建系统指令内容
-	systemContent := &genai.Content{
-		Parts: []*genai.Part{{Text: systemInstruction}},
-		Role:  genai.RoleUser, // Gemini API 使用 RoleUser 作为系统提示
-	}
-
-	response, err := p.client.Models.GenerateContent(ctx, model,
-		[]*genai.Content{systemContent, content},
-		&genai.GenerateContentConfig{
-			Temperature:     &temperature,
-			TopP:            &topP,
-			MaxOutputTokens: 32768,
-		})
-
-	if err != nil {
-		return "", fmt.Errorf("gemini prompt enhancement error: %w", err)
-	}
-
-	// 提取增强后的文本
-	if len(response.Candidates) > 0 && response.Candidates[0].Content != nil && len(response.Candidates[0].Content.Parts) > 0 {
-		enhancedText := response.Candidates[0].Content.Parts[0].Text
-		if enhancedText != "" {
-			return enhancedText, nil
-		}
-	}
-
-	// 如果没有返回内容，返回原始提示词
-	return params.Prompt, nil
 }
 
 // ==================== 辅助函数 ====================

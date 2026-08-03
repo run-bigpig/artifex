@@ -1,8 +1,8 @@
 package provider
 
 import (
-	"context"
 	"artifex/core/types"
+	"context"
 )
 
 // ==================== AI 功能枚举 ====================
@@ -15,8 +15,6 @@ const (
 	FeatureGenerateImage AIFeature = "generateImage"
 	// FeatureEditImage 图像编辑功能
 	FeatureEditImage AIFeature = "editImage"
-	// FeatureEnhancePrompt 提示词增强功能
-	FeatureEnhancePrompt AIFeature = "enhancePrompt"
 	// FeatureRemoveBackground 背景移除功能
 	FeatureRemoveBackground AIFeature = "removeBackground"
 	// FeatureReferenceImage 参考图像功能
@@ -32,8 +30,6 @@ type ProviderCapabilities struct {
 	GenerateImage bool `json:"generateImage"`
 	// EditImage 是否支持图像编辑
 	EditImage bool `json:"editImage"`
-	// EnhancePrompt 是否支持提示词增强
-	EnhancePrompt bool `json:"enhancePrompt"`
 	// RemoveBackground 是否支持背景移除
 	RemoveBackground bool `json:"removeBackground"`
 	// ReferenceImage 是否支持参考图像
@@ -47,8 +43,6 @@ func (c ProviderCapabilities) IsSupported(feature AIFeature) bool {
 		return c.GenerateImage
 	case FeatureEditImage:
 		return c.EditImage
-	case FeatureEnhancePrompt:
-		return c.EnhancePrompt
 	case FeatureRemoveBackground:
 		return c.RemoveBackground
 	case FeatureReferenceImage:
@@ -84,15 +78,6 @@ type AIProvider interface {
 	//   - 错误信息
 	EditMultiImages(ctx context.Context, params types.MultiImageEditParams) (string, error)
 
-	// EnhancePrompt 增强提示词
-	// 参数：
-	//   - ctx: 上下文
-	//   - params: 增强提示词参数（包含提示词和可选的参考图像）
-	// 返回：
-	//   - 增强后的提示词
-	//   - 错误信息
-	EnhancePrompt(ctx context.Context, params types.EnhancePromptParams) (string, error)
-
 	// GetCapabilities 返回提供商支持的功能
 	GetCapabilities() ProviderCapabilities
 
@@ -107,4 +92,9 @@ type AIProvider interface {
 	// Close 清理资源
 	// 在提供商不再使用时调用，用于释放连接、清理缓存等
 	Close() error
+}
+
+// IntentRecognizer 是支持当前输入框多模态意图识别的可选提供商接口。
+type IntentRecognizer interface {
+	RecognizeIntent(ctx context.Context, params types.IntentRecognitionParams) (string, error)
 }

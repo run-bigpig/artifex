@@ -196,11 +196,9 @@ func (a *App) RemoveBackground(imageData string, requestID string) (string, erro
 	return a.aiService.RemoveBackground(imageData, requestID)
 }
 
-// EnhancePrompt 增强提示词
-// paramsJSON: JSON 格式的 EnhancePromptParams，包含 prompt 和可选的 referenceImages
-// requestID: 请求 ID，用于管理 context 和取消请求
-func (a *App) EnhancePrompt(paramsJSON string, requestID string) (string, error) {
-	return a.aiService.EnhancePrompt(paramsJSON, requestID)
+// RecognizeIntent 根据当前文本和参考图为模糊输入生成候选意图
+func (a *App) RecognizeIntent(paramsJSON string, requestID string) (string, error) {
+	return a.aiService.RecognizeIntent(paramsJSON, requestID)
 }
 
 // CancelAIRequest 取消 AI 请求
