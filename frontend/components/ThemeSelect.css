@@ -1,0 +1,139 @@
+.theme-select {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+}
+.theme-select__trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+  height: 38px;
+  padding: 8px 12px;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  background: #0f172a;
+  color: #e2e8f0;
+  font-size: 14px;
+  line-height: 20px;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 0.15s,
+    background 0.15s;
+}
+.theme-select__trigger:hover:not(:disabled) {
+  border-color: #526178;
+  background: #131e31;
+}
+.theme-select__trigger:focus-visible,
+.theme-select__trigger[aria-expanded="true"] {
+  outline: none;
+  border-color: #6588b4;
+  box-shadow: 0 0 0 2px #6084b01a;
+}
+.theme-select__trigger:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.theme-select__value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.theme-select svg {
+  flex-shrink: 0;
+  color: #7c8da5;
+  transition: transform 0.15s;
+}
+.theme-select svg.is-open {
+  transform: rotate(180deg);
+}
+.theme-select__editable {
+  position: relative;
+}
+.theme-select__input {
+  display: block;
+  padding-right: 36px;
+  cursor: text;
+  font-family: ui-monospace, monospace;
+}
+.theme-select__input::placeholder {
+  color: #64748b;
+}
+.theme-select__expand {
+  position: absolute;
+  right: 1px;
+  top: 1px;
+  bottom: 1px;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  background: transparent;
+  border: 0;
+  border-radius: 0 7px 7px 0;
+  cursor: pointer;
+}
+.theme-select__popup {
+  position: fixed;
+  z-index: 220;
+  box-sizing: border-box;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 4px;
+  border: 1px solid #3a485d;
+  border-radius: 10px;
+  background: #162033;
+  color: #dbe4ef;
+  box-shadow:
+    0 12px 32px #0006,
+    inset 0 1px 0 #ffffff04;
+  font-size: 13px;
+  line-height: 20px;
+  scrollbar-width: thin;
+  scrollbar-color: #475569 transparent;
+}
+.theme-select__option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 36px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.theme-select__option > span {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.theme-select__option svg {
+  flex-shrink: 0;
+  color: #93b9e4;
+}
+.theme-select__option.is-active:not([aria-disabled="true"]) {
+  background: #25364e;
+  color: #f1f5f9;
+}
+.theme-select__option[aria-selected="true"] {
+  color: #b9d4f4;
+}
+.theme-select__option[aria-disabled="true"] {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.theme-select__empty {
+  padding: 10px;
+  color: #8392a8;
+  font-size: 12px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .theme-select__trigger,
+  .theme-select svg {
+    transition: none;
+  }
+}

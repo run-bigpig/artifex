@@ -1,7 +1,9 @@
 package core
 
 import (
+	"artifex/core/provider"
 	"artifex/core/service"
+	"artifex/core/types"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -295,4 +297,32 @@ func (a *App) Update() (string, error) {
 // 更新完成后调用此方法自动重启应用
 func (a *App) RestartApplication() error {
 	return a.updateService.RestartApplication()
+}
+
+// ListProviderModels checks a draft connection without saving it or generating images.
+func (a *App) ListProviderModels(configJSON string) ([]string, error) {
+	var connection types.ProviderConfig
+	if err := json.Unmarshal([]byte(configJSON), &connection); err != nil {
+		return nil, err
+	}
+	connection.Models = []types.ModelDefinition{}
+	settings := connection.AdapterSettings()
+	switch connection.Type {
+	case "openai":
+		p, err := provider.NewOpenAIProvider(a.ctx, settings)
+		if err != nil {
+			return nil, err
+		}
+		defer p.Close()
+		return p.ListModels(a.ctx)
+	case "gemini":
+		p, err := provider.NewGeminiProvider(a.ctx, settings)
+		if err != nil {
+			return nil, err
+		}
+		defer p.Close()
+		return p.ListModels(a.ctx)
+	default:
+		return nil, fmt.Errorf("不支持的服务商类型")
+	}
 }

@@ -271,3 +271,19 @@ export const calculateZoomViewport = (
   };
 };
 
+
+// Keep region metadata separate from the preview: alpha=0 identifies new pixels.
+export const generateExpandedEdit = async (src: string, offsets: ExpandOffsets) => {
+  const { width, height } = await getImageNaturalDimensions(src);
+  const w = width + offsets.left + offsets.right;
+  const h = height + offsets.top + offsets.bottom;
+  if (w <= 0 || h <= 0 || w * h > 32_000_000) throw new Error('扩图画布过大，请缩小扩展范围');
+  if (w / h > 3 || h / w > 3) throw new Error('扩图宽高比需要在 1:3 到 3:1 之间');
+  const image = await generateExpandedImage(src, offsets);
+  const mask = document.createElement('canvas'); mask.width = w; mask.height = h;
+  const ctx = mask.getContext('2d');
+  if (!ctx) throw new Error('无法创建扩图蒙版');
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = '#ffffff'; ctx.fillRect(offsets.left, offsets.top, width, height);
+  return { image, mask: mask.toDataURL('image/png'), size: `${w}x${h}` };
+};

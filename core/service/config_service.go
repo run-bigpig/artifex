@@ -158,45 +158,17 @@ func (c *ConfigService) SaveSettings(settingsJSON string) error {
 		return fmt.Errorf("invalid settings format: %w", err)
 	}
 
-	// 加密敏感信息
-	if settings.AI.APIKey != "" {
-		encrypted, err := c.encrypt(settings.AI.APIKey)
-		if err != nil {
-			return fmt.Errorf("failed to encrypt API key: %w", err)
-		}
-		settings.AI.APIKey = encrypted
-	}
+	settings.AI = types.NormalizeAISettings(settings.AI)
 
-	if settings.AI.VertexCredentials != "" {
-		encrypted, err := c.encrypt(settings.AI.VertexCredentials)
-		if err != nil {
-			return fmt.Errorf("failed to encrypt Vertex credentials: %w", err)
-		}
-		settings.AI.VertexCredentials = encrypted
+	if err := types.ValidateProviderConfigs(settings.AI); err != nil {
+		return err
 	}
-
-	if settings.AI.OpenAIAPIKey != "" {
-		encrypted, err := c.encrypt(settings.AI.OpenAIAPIKey)
+	for i := range settings.AI.Providers {
+		encrypted, err := c.encrypt(settings.AI.Providers[i].APIKey)
 		if err != nil {
-			return fmt.Errorf("failed to encrypt OpenAI API key: %w", err)
+			return fmt.Errorf("failed to encrypt provider API key: %w", err)
 		}
-		settings.AI.OpenAIAPIKey = encrypted
-	}
-
-	if settings.AI.OpenAIImageAPIKey != "" {
-		encrypted, err := c.encrypt(settings.AI.OpenAIImageAPIKey)
-		if err != nil {
-			return fmt.Errorf("failed to encrypt OpenAI Image API key: %w", err)
-		}
-		settings.AI.OpenAIImageAPIKey = encrypted
-	}
-
-	if settings.AI.CloudToken != "" {
-		encrypted, err := c.encrypt(settings.AI.CloudToken)
-		if err != nil {
-			return fmt.Errorf("failed to encrypt Cloud token: %w", err)
-		}
-		settings.AI.CloudToken = encrypted
+		settings.AI.Providers[i].APIKey = encrypted
 	}
 
 	// 序列化
@@ -252,15 +224,6 @@ func (c *ConfigService) LoadSettings() (string, error) {
 		}
 	}
 
-	if settings.AI.VertexCredentials != "" {
-		decrypted, err := c.decrypt(settings.AI.VertexCredentials)
-		if err != nil {
-			settings.AI.VertexCredentials = ""
-		} else {
-			settings.AI.VertexCredentials = decrypted
-		}
-	}
-
 	if settings.AI.OpenAIAPIKey != "" {
 		decrypted, err := c.decrypt(settings.AI.OpenAIAPIKey)
 		if err != nil {
@@ -279,14 +242,15 @@ func (c *ConfigService) LoadSettings() (string, error) {
 		}
 	}
 
-	if settings.AI.CloudToken != "" {
-		decrypted, err := c.decrypt(settings.AI.CloudToken)
+	for i := range settings.AI.Providers {
+		decrypted, err := c.decrypt(settings.AI.Providers[i].APIKey)
 		if err != nil {
-			settings.AI.CloudToken = ""
+			settings.AI.Providers[i].APIKey = ""
 		} else {
-			settings.AI.CloudToken = decrypted
+			settings.AI.Providers[i].APIKey = decrypted
 		}
 	}
+	settings.AI = types.NormalizeAISettings(settings.AI)
 
 	// 重新序列化（包含解密后的数据）
 	result, err := json.Marshal(settings)
@@ -301,24 +265,7 @@ func (c *ConfigService) LoadSettings() (string, error) {
 func (c *ConfigService) getDefaultSettings() string {
 	defaults := types.Settings{
 		Version: "1.0.0",
-		AI: types.AISettings{
-			Provider:   "gemini",
-			TextModel:  "gemini-2.5-flash",
-			ImageModel: "gemini-2.5-flash-preview-05-20",
-
-			// Vertex AI 默认配置
-			UseVertexAI:    false,
-			VertexLocation: "us-central1",
-
-			// OpenAI 默认配置
-			OpenAIBaseURL:    "https://api.openai.com/v1",
-			OpenAITextModel:  "gpt-4o",
-			OpenAIImageModel: "dall-e-3",
-
-			// Cloud 云服务默认配置
-			CloudEndpointURL: "",
-			CloudToken:       "",
-		},
+		AI:      types.AISettings{Providers: []types.ProviderConfig{}},
 	}
 
 	data, _ := json.Marshal(defaults)

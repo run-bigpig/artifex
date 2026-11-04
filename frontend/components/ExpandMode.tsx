@@ -10,8 +10,8 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Maximize2, X } from 'lucide-react';
-import { CanvasImage, Point, Viewport, ExpandOffsets } from '../types';
-import { generateExpandedImage, getImageNaturalDimensions } from '../utils/canvasUtils';
+import { CanvasImage, Point, Viewport, ExpandOffsets, ExpandedImage } from '../types';
+import { generateExpandedEdit, getImageNaturalDimensions } from '../utils/canvasUtils';
 
 // ==================== 类型定义 ====================
 
@@ -27,7 +27,7 @@ interface ExpandModeProps {
   /** 容器 ref（用于坐标计算） */
   containerRef: React.RefObject<HTMLDivElement>;
   /** 生成扩图回调 */
-  onGenerate: (expandedBase64: string) => void;
+  onGenerate: (expandedBase64: ExpandedImage) => void;
   /** 取消/退出回调 */
   onCancel: () => void;
   /** Ctrl 键是否按下（从父组件传入以保持同步） */
@@ -86,7 +86,7 @@ const ExpandMode: React.FC<ExpandModeProps> = ({
   }, [viewport, image]);
 
   /** 生成扩展后的图片 */
-  const generateExpandedImageLocal = useCallback(async (): Promise<string> => {
+  const generateExpandedImageLocal = useCallback(async (): Promise<ExpandedImage> => {
     // 获取图片的原始尺寸
     const naturalDims = await getImageNaturalDimensions(image.src);
     
@@ -102,7 +102,7 @@ const ExpandMode: React.FC<ExpandModeProps> = ({
       left: Math.round(expandOffsets.left * scaleX),
     };
     
-    return await generateExpandedImage(image.src, naturalOffsets);
+    return await generateExpandedEdit(image.src, naturalOffsets);
   }, [image, expandOffsets]);
 
   // ==================== 拖动处理 ====================

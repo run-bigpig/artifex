@@ -1,3 +1,4 @@
+import type { ExpandedImage } from '../types';
 import React, { useRef, useState, useEffect, useCallback, useMemo } from 'react';
 import { CanvasImage, Point, Viewport, CanvasActionType } from '../types';
 import { Trash2, Edit, Upload, Copy, Check, MousePointer2, Scissors, Sparkles, Maximize2 } from 'lucide-react';
@@ -28,7 +29,7 @@ interface CanvasProps {
   setViewport: React.Dispatch<React.SetStateAction<Viewport>>;
   onAction: (id: string, action: CanvasActionType) => void;
   onImportImage: (imageSrc: string, x?: number, y?: number) => void;
-  onGenerateExpanded?: (imageId: string, expandedImageDataUrl: string) => void;
+  onGenerateExpanded?: (imageId: string, expandedImageDataUrl: ExpandedImage) => void;
 }
 
 type ResizeHandle = 'tl' | 'tr' | 'bl' | 'br';

@@ -10,7 +10,7 @@
  */
 
 import { GenerateImage, EditMultiImages, RecognizeIntent, CancelAIRequest } from '../wailsjs/go/core/App';
-import { IntentOption, ModelSettings, ThinkingLevel } from '../types';
+import { IntentOption, ModelSettings, ThinkingLevel, ImageOperationOptions } from '../types';
 
 // ==================== 请求 ID 生成 ====================
 
@@ -82,7 +82,7 @@ function createCancellableRequest<T>(
 /**
  * 生成图像参数接口（与 Go 后端 GenerateImageParams 对应）
  */
-interface GenerateImageParams {
+interface GenerateImageParams extends ImageOperationOptions {
   prompt: string;
   referenceImage?: string; // data URL 参考图像
   sketchImage?: string; // data URL 草图图像
@@ -94,7 +94,7 @@ interface GenerateImageParams {
 /**
  * 多图编辑参数接口（与 Go 后端 MultiImageEditParams 对应）
  */
-interface MultiImageEditParams {
+interface MultiImageEditParams extends ImageOperationOptions {
   images: string[]; // data URL 图像数组（支持单图或多图）
   prompt: string; // 编辑提示词
   imageSize?: string; // 图片尺寸，可选值："1K", "2K", "4K"（可选）
@@ -106,6 +106,8 @@ interface MultiImageEditParams {
  * 意图识别参数接口（与 Go 后端 IntentRecognitionParams 对应）
  */
 interface IntentRecognitionParams {
+  provider?: string;
+  model?: string;
   message: string;
   referenceImages?: string[];
 }
@@ -135,6 +137,9 @@ export const generateImage = async (
     const params: GenerateImageParams = {
       prompt,
       imageSize: settings?.imageSize || '1K',
+      model: settings?.model,
+      provider: settings?.provider,
+      imageToolModel: settings?.imageToolModel,
       aspectRatio: settings?.aspectRatio || '1:1',
       thinkingLevel,
     };
@@ -200,7 +205,8 @@ export const editMultiImages = async (
   imageSize?: string,
   aspectRatio?: string,
   thinkingLevel: ThinkingLevel = 'medium',
-  requestID?: string
+  requestID?: string,
+  options: ImageOperationOptions = {}
 ): Promise<string> => {
   try {
     if (base64Images.length === 0) {
@@ -209,6 +215,7 @@ export const editMultiImages = async (
 
     // 统一使用多图编辑参数
     const params: MultiImageEditParams = {
+      ...options,
       images: base64Images,
       prompt: prompt,
       thinkingLevel,
@@ -246,11 +253,12 @@ export const editMultiImagesCancellable = (
   prompt: string,
   imageSize?: string,
   aspectRatio?: string,
-  thinkingLevel: ThinkingLevel = 'medium'
+  thinkingLevel: ThinkingLevel = 'medium',
+  options: ImageOperationOptions = {}
 ): CancellableRequest<string> => {
   const requestID = generateRequestID();
   return createCancellableRequest(
-    () => editMultiImages(base64Images, prompt, imageSize, aspectRatio, thinkingLevel, requestID),
+    () => editMultiImages(base64Images, prompt, imageSize, aspectRatio, thinkingLevel, requestID, options),
     requestID
   );
 };
@@ -258,9 +266,11 @@ export const editMultiImagesCancellable = (
 export const recognizeIntent = async (
   message: string,
   referenceImages: string[],
-  requestID?: string
+  requestID?: string,
+  model?: string,
+  provider?: string
 ): Promise<IntentOption[]> => {
-  const params: IntentRecognitionParams = { message };
+  const params: IntentRecognitionParams = { message, model, provider };
   if (referenceImages.length > 0) {
     params.referenceImages = referenceImages;
   }
@@ -287,11 +297,13 @@ export const recognizeIntent = async (
 
 export const recognizeIntentCancellable = (
   message: string,
-  referenceImages: string[]
+  referenceImages: string[],
+  model?: string,
+  provider?: string
 ): CancellableRequest<IntentOption[]> => {
   const requestID = generateRequestID();
   return createCancellableRequest(
-    () => recognizeIntent(message, referenceImages, requestID),
+    () => recognizeIntent(message, referenceImages, requestID, model, provider),
     requestID
   );
 };

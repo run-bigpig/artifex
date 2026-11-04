@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
-import { ChatMessage, CanvasImage, Attachment, ModelSettings, AspectRatio, ImageSize, IntentOption, MessageType, ThinkingLevel } from '../types';
-import { Send, Bot, X, Paperclip, Edit2, Loader2, Monitor, Square, RectangleHorizontal, RectangleVertical, Image, Trash2, ScanSearch, Square as StopIcon } from 'lucide-react';
+import { ChatMessage, CanvasImage, Attachment, ModelSettings, AspectRatio, ImageSize, IntentOption, MessageType, ThinkingLevel, ImageOperationOptions } from '../types';
+import { Send, Bot, X, Paperclip, Edit2, Loader2, Trash2, Square as StopIcon } from 'lucide-react';
 import {
   recognizeIntentCancellable,
   CancellableRequest,
@@ -11,7 +11,11 @@ import { loadChatHistory, saveChatHistory, clearChatHistory, flushChatHistory } 
 import { storeImage } from '../services/imageService';
 import ConfirmDialog from './ConfirmDialog';
 import IntentOptionsPanel from './IntentOptionsPanel';
-import ThinkingLevelPicker from './ThinkingLevelPicker';
+import OperationModels from './OperationModels';
+import { SIDEBAR_WIDTH } from '../utils/layout';
+import { errorMessage } from '../utils/errorMessage';
+import { loadSettings } from '../services/settingsService';
+import { AISettings } from '../types/settings';
 import { ensureDataUrl, isDataUrl, isImageRef, normalizeImageSrc, toImageRef } from '../utils/imageSource';
 
 interface SidebarProps {
@@ -61,6 +65,27 @@ const Sidebar: React.FC<SidebarProps> = ({
   onChatHistoryLoaded,
   messagesRef
 }) => {
+  const [aiSettings, setAISettings] = useState<AISettings | null>(null);
+  const previousProvider = useRef('');
+  const activeProvider = modelSettings.provider || aiSettings?.defaultProviderId;
+  useEffect(() => {
+    let alive = true;
+    const refresh = () => loadSettings().then(s => { if (alive) setAISettings(s.ai); });
+    refresh(); window.addEventListener('ai-settings-changed', refresh);
+    return () => { alive = false; window.removeEventListener('ai-settings-changed', refresh); };
+  }, []);
+  useEffect(() => {
+    if (!aiSettings) return;
+    if (previousProvider.current && previousProvider.current !== aiSettings.defaultProviderId && !modelSettings.provider) setModelSettings({ ...modelSettings, model: '', intentModel: '', imageToolModel: '' });
+    previousProvider.current = aiSettings.defaultProviderId;
+  }, [aiSettings?.defaultProviderId]);
+  const connection = aiSettings?.providers?.find(p => p.id === activeProvider);
+  const isOpenAI = connection?.type === 'openai';
+  const selectedModel = connection?.models?.find(m => m.modality === "image" && m.modelId === (modelSettings.model || connection.imageModel));
+  const supportsThinking = selectedModel && !isOpenAI && /gemini-3\.1-flash.*image/.test(selectedModel.modelId);
+  const thinkingLevels: ThinkingLevel[] = ['low', 'high'];
+  const operation = attachments[0]?.operation;
+  const operationNames = { edit: '编辑', reference: '参考图', extract_subject: '透明抠图', extract_mid: '提取中景', extract_bg: '保留背景', enhance: '画质修复', expand: '蒙版扩图' };
   // Chat State
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   
@@ -71,7 +96,6 @@ const Sidebar: React.FC<SidebarProps> = ({
   const [isRecognizingIntent, setIsRecognizingIntent] = useState(false);
   const [intentOptions, setIntentOptions] = useState<IntentOption[]>([]);
   const [intentError, setIntentError] = useState('');
-  const [showResPicker, setShowResPicker] = useState(false);
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>('medium');
   
   // 请求状态管理
@@ -85,7 +109,6 @@ const Sidebar: React.FC<SidebarProps> = ({
   const scrollRafRef = useRef<number | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const resPickerRef = useRef<HTMLDivElement>(null);
   const isInitialLoadRef = useRef(true);
   const prevAttachmentsLengthRef = useRef<number>(0);
   const prevMessagesRef = useRef<ChatMessage[] | null>(null);
@@ -412,28 +435,16 @@ const Sidebar: React.FC<SidebarProps> = ({
     prevAttachmentsLengthRef.current = currentLength;
   }, [attachments.length]);
   
-  // Close res picker when clicking outside
-  useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
-      if (resPickerRef.current && !resPickerRef.current.contains(event.target as Node)) {
-        setShowResPicker(false);
-      }
-    };
-    if (showResPicker) {
-      document.addEventListener('mousedown', handleClickOutside);
-    }
-    return () => {
-      document.removeEventListener('mousedown', handleClickOutside);
-    };
-  }, [showResPicker]);
 
-  const addMessage = (role: 'user' | 'model', text: string, type: 'text' | 'system' | 'error' = 'text', messageImages?: string[]) => {
+
+  const addMessage = (role: 'user' | 'model', text: string, type: 'text' | 'system' | 'error' = 'text', messageImages?: string[], operationOptions?: ImageOperationOptions) => {
     setMessages(prev => [...prev, {
       id: Date.now().toString(),
       role,
       type,
       text,
       images: messageImages,
+      operationOptions,
       timestamp: Date.now()
     }]);
   };
@@ -669,21 +680,23 @@ const Sidebar: React.FC<SidebarProps> = ({
     }
   };
 
-  const handleReusePrompt = (text: string, msgImages?: string[]) => {
+  const handleReusePrompt = (text: string, msgImages?: string[], operationOptions?: ImageOperationOptions) => {
     setInputValue(text);
     setIntentOptions([]);
     setIntentError('');
     if (msgImages && msgImages.length > 0) {
-      const recoveredAttachments: Attachment[] = msgImages.map((src) => {
+      const recoveredAttachments: Attachment[] = msgImages.map((src, index) => {
         const normalized = toImageRef(src);
         return {
           id: Math.random().toString(36).substr(2, 9),
           type: isDataUrl(normalized) ? 'local' : 'url',
-          content: normalized
+          content: normalized,
+          ...(index === 0 ? operationOptions : {}),
         };
       });
       setAttachments(recoveredAttachments);
-    }
+    } else { setAttachments([]); }
+    if (operationOptions) setModelSettings({ ...modelSettings, provider: operationOptions.provider, model: operationOptions.model, imageToolModel: operationOptions.imageToolModel });
     textareaRef.current?.focus();
   };
 
@@ -709,7 +722,7 @@ const Sidebar: React.FC<SidebarProps> = ({
     try {
       const referenceImages = await resolveAttachmentDataUrls();
       if (intentRequestVersionRef.current !== requestVersion) return;
-      request = recognizeIntentCancellable(inputValue.trim(), referenceImages);
+      request = recognizeIntentCancellable(inputValue.trim(), referenceImages, modelSettings.intentModel, modelSettings.provider);
       currentIntentRequestRef.current = request;
       const options = await request.promise;
       if (!request.isAborted() && intentRequestVersionRef.current === requestVersion) {
@@ -722,7 +735,7 @@ const Sidebar: React.FC<SidebarProps> = ({
         && error?.message !== 'Request was cancelled'
       ) {
         console.error('Intent recognition failed', error);
-        setIntentError('暂时无法识别意图，请稍后重试。');
+        setIntentError(String(error?.message || error));
       }
     } finally {
       if (intentRequestVersionRef.current === requestVersion) {
@@ -831,23 +844,33 @@ const Sidebar: React.FC<SidebarProps> = ({
       if (isRequestActive) return;
 
       const currentInput = inputValue;
+      const requestOptions: ImageOperationOptions = {
+        provider: activeProvider, model: selectedModel?.modelId,
+        operation: attachments[0]?.operation, maskImage: attachments[0]?.maskImage, outputSize: attachments[0]?.outputSize,
+      };
       let currentBase64s: string[] = [];
       let currentImageRefs: string[] = [];
       try {
         // Resolve current attachments to data URLs for the API
         currentBase64s = await resolveAttachmentDataUrls();
         currentImageRefs = await resolveAttachmentRefs();
+        if (requestOptions.maskImage && isDataUrl(requestOptions.maskImage)) requestOptions.maskImage = await storeImage(requestOptions.maskImage);
       } catch (error) {
         console.error('Failed to resolve attachments:', error);
         addMessage('model', '附件读取失败，请重试', 'error');
         return;
       }
-      setInputValue('');
-      setIntentOptions([]);
-      setIntentError('');
-
+      if (isOpenAI && currentBase64s.length > 16) {
+        addMessage('model', '一次最多支持 16 张输入图片', 'error');
+        return;
+      }
+      if (!connection?.enabled || !selectedModel || !selectedModel.enabled) {
+        addMessage('model', '请选择已启用的图片任务模型', 'error');
+        return;
+      }
+      setInputValue(''); setIntentOptions([]); setIntentError('');
       // 1. Add User Message
-      addMessage('user', currentInput, 'text', currentImageRefs);
+      addMessage('user', currentInput, 'text', currentImageRefs, requestOptions);
       setAttachments([]); // Clear attachments after use
 
       // 2. Add Loading Indicator
@@ -873,16 +896,17 @@ const Sidebar: React.FC<SidebarProps> = ({
           currentInput,
           modelSettings.imageSize || undefined,
           modelSettings.aspectRatio || undefined,
-          thinkingLevel
+          thinkingLevels.includes(thinkingLevel) ? thinkingLevel : thinkingLevels[0],
+          requestOptions
         );
       } else {
         // Generate Mode - 使用可取消的生成方法
         request = generateImageCancellable(
           currentInput,
-          modelSettings,
+          { ...modelSettings, provider: activeProvider, model: selectedModel.modelId, imageToolModel: undefined },
           undefined, // referenceImage
           undefined, // sketchImage
-          thinkingLevel
+          thinkingLevels.includes(thinkingLevel) ? thinkingLevel : thinkingLevels[0]
         );
       }
       
@@ -930,7 +954,7 @@ const Sidebar: React.FC<SidebarProps> = ({
           setMessages(prev => prev.filter(msg => msg.id !== loadingId));
           currentLoadingIdRef.current = null;
         }
-        addMessage('model', '抱歉，处理您的请求时出现错误。', 'error');
+        addMessage('model', `图片处理失败：${errorMessage(err)}`, 'error');
         console.error(err);
       } finally {
         // 清理请求状态
@@ -1009,12 +1033,12 @@ const Sidebar: React.FC<SidebarProps> = ({
     });
   };
 
-  const ratios: { label: string, value: AspectRatio, icon: React.ElementType }[] = [
-    { label: '1:1', value: '1:1', icon: Square },
-    { label: '16:9', value: '16:9', icon: RectangleHorizontal },
-    { label: '9:16', value: '9:16', icon: RectangleVertical },
-    { label: '4:3', value: '4:3', icon: RectangleHorizontal }, // Reuse icon but different label
-    { label: '3:4', value: '3:4', icon: RectangleVertical },
+  const ratios: { label: string, value: AspectRatio }[] = [
+    { label: '1:1', value: '1:1' },
+    { label: '16:9', value: '16:9' },
+    { label: '9:16', value: '9:16' },
+    { label: '4:3', value: '4:3' },
+    { label: '3:4', value: '3:4' },
   ];
 
   const sizes: ImageSize[] = ['1K', '2K', '4K'];
@@ -1033,9 +1057,9 @@ const Sidebar: React.FC<SidebarProps> = ({
         onCancel={() => setConfirmDialog(prev => ({ ...prev, isOpen: false }))}
       />
       
-      <div className="relative h-full bg-slate-950 flex flex-col overflow-hidden w-[420px] border-r border-slate-800">
+      <div className="relative h-full bg-slate-950 flex flex-col overflow-hidden border-r border-slate-800" style={{ width: SIDEBAR_WIDTH }}>
       {/* Main Content Wrapper */}
-      <div className="w-[420px] h-full flex flex-col relative">
+      <div className="w-full h-full flex flex-col relative">
 
           {/* Chat History Header with Clear Button */}
           {messages.some(msg => msg.role === 'user') && (
@@ -1153,7 +1177,7 @@ const Sidebar: React.FC<SidebarProps> = ({
                       </div>
                     )}
                     
-                    {msg.text && <p className="whitespace-pre-wrap">{msg.text}</p>}
+                    {msg.text && <p className="whitespace-pre-wrap break-words">{msg.text}</p>}
                   </div>
 
                   {/* Edit/Reuse Button */}
@@ -1161,7 +1185,7 @@ const Sidebar: React.FC<SidebarProps> = ({
                     <div className="flex justify-center mt-2">
                       <button
                         type="button"
-                        onClick={() => handleReusePrompt(msg.text, msg.images)}
+                        onClick={() => handleReusePrompt(msg.text, msg.images, msg.operationOptions)}
                         className="inline-flex min-h-10 min-w-[96px] items-center justify-center gap-2 rounded-full border border-blue-400/50 bg-blue-500/15 px-4 py-2 text-xs font-semibold text-blue-200 shadow-lg shadow-blue-950/30 transition-all hover:border-blue-300 hover:bg-blue-500 hover:text-white hover:shadow-blue-900/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950 active:scale-95"
                         title="重新编辑这条消息"
                         aria-label="重新编辑这条消息"
@@ -1184,6 +1208,8 @@ const Sidebar: React.FC<SidebarProps> = ({
           {/* Input Area */}
           <div className="p-5 bg-slate-950 border-t border-slate-800 z-20">
             <form onSubmit={handleSubmit} className="relative group/input">
+          {operation && <div className="mb-2 flex items-center justify-between rounded-md border border-blue-500/20 bg-blue-500/5 px-2 py-1 text-xs text-blue-300"><span>{operationNames[operation]} · 专用约束已启用{!isOpenAI && (operation === 'extract_subject' || operation === 'extract_mid') ? ' · 透明输出取决于模型' : ''}</span><button type="button" onClick={() => setAttachments(items => items.map(({ operation, maskImage, outputSize, ...item }) => item))} aria-label="取消专用操作约束">×</button></div>}
+
               <IntentOptionsPanel
                 options={intentOptions}
                 isLoading={isRecognizingIntent}
@@ -1193,6 +1219,7 @@ const Sidebar: React.FC<SidebarProps> = ({
               />
               
               <div
+                data-prompt-composer
                 onDrop={handleDrop}
                 onDragOver={handleDragOver}
                 onDragLeave={handleDragLeave}
@@ -1203,7 +1230,7 @@ const Sidebar: React.FC<SidebarProps> = ({
               >
                 {/* Internal Attachment Preview */}
                 {resolvedAttachments.length > 0 && (
-                  <div className="flex items-center gap-3 overflow-x-auto p-3 border-b border-white/5 mx-1">
+                  <div className="flex items-center gap-3 overflow-x-auto p-3 pr-24 border-b border-white/5 mx-1">
                     {resolvedAttachments.map((img) => (
                       <div key={img.id} className="relative group shrink-0">
                         <div className="w-14 h-14 rounded-lg overflow-hidden bg-slate-800 border border-slate-700 shadow-sm">
@@ -1237,7 +1264,7 @@ const Sidebar: React.FC<SidebarProps> = ({
                       ? "输入提示词..." 
                       : "输入提示词，或拖拽图片到这里..."
                   }
-                  className="w-full bg-transparent p-4 text-base text-slate-200 placeholder:text-slate-500 focus:outline-none resize-none min-h-[50px] max-h-[200px] scrollbar-hide leading-normal"
+                  className="w-full bg-transparent p-4 pr-24 text-base text-slate-200 placeholder:text-slate-500 focus:outline-none resize-none min-h-[50px] max-h-[200px] scrollbar-hide leading-normal"
                   rows={resolvedAttachments.length > 0 ? 2 : 3}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' && !e.shiftKey) {
@@ -1247,162 +1274,38 @@ const Sidebar: React.FC<SidebarProps> = ({
                   }}
                 />
                 
-                {/* Bottom Toolbar */}
-                <div className="flex items-center justify-between px-3 py-2.5 bg-slate-900/50 rounded-b-2xl relative">
-                  {/* Left Actions (Upload & Settings) */}
-                  <div className="flex items-center gap-2">
-                     {!isProcessing && (
-                       <>
-                         <button
-                          type="button"
-                          onClick={() => fileInputRef.current?.click()}
-                          className="p-2 text-slate-400 hover:text-blue-400 hover:bg-slate-800 rounded-lg transition-colors"
-                          title="上传图片"
-                         >
-                           <Paperclip size={18} />
-                         </button>
-                         <input
-                          type="file"
-                          ref={fileInputRef}
-                          className="hidden"
-                          accept="image/*"
-                          multiple
-                          onChange={handleFileSelect}
-                         />
-
-                         <div className="relative" ref={resPickerRef}>
-                            <button
-                              type="button"
-                              onClick={() => setShowResPicker(!showResPicker)}
-                              className={`p-2 rounded-lg transition-colors flex items-center gap-2 ${
-                                showResPicker ? 'text-blue-400 bg-slate-800' : 'text-slate-400 hover:text-blue-400 hover:bg-slate-800'
-                              }`}
-                              title="尺寸与分辨率"
-                            >
-                              <Monitor size={18} />
-                              <span className="text-xs font-medium">
-                                {resolvedAttachments.length > 0 && modelSettings.aspectRatio === "" && modelSettings.imageSize === ""
-                                  ? '保持原图'
-                                  : `${modelSettings.aspectRatio || (resolvedAttachments.length > 0 ? '原图' : '1:1')} · ${modelSettings.imageSize || (resolvedAttachments.length > 0 ? '原图' : '1K')}`}
-                              </span>
-                            </button>
-
-                            {/* Resolution/Ratio Popover */}
-                            {showResPicker && (
-                              <div className="absolute bottom-full left-0 mb-3 w-64 bg-slate-900 border border-slate-700 rounded-xl shadow-2xl z-50 p-4 animate-in fade-in zoom-in-95 duration-200">
-                                {/* Aspect Ratio */}
-                                <div className="mb-4">
-                                  <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3 block">宽高比</label>
-                                  <div className="grid grid-cols-3 gap-2">
-                                    {/* 保持原图选项 - 只在有参考图时显示 */}
-                                    {resolvedAttachments.length > 0 && (
-                                      <button
-                                        type="button"
-                                        onClick={() => {
-                                          setModelSettings({...modelSettings, aspectRatio: ""});
-                                        }}
-                                        className={`flex flex-col items-center justify-center p-2 rounded-lg border transition-all ${
-                                          modelSettings.aspectRatio === "" 
-                                            ? 'bg-blue-600/20 border-blue-500 text-blue-400' 
-                                            : 'bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-700 hover:border-slate-600'
-                                        }`}
-                                        title="保持原图宽高比"
-                                      >
-                                        <Image size={16} className="mb-1" />
-                                        <span className="text-[10px]">原图</span>
-                                      </button>
-                                    )}
-                                    {ratios.map(r => (
-                                      <button
-                                        key={r.value}
-                                        type="button"
-                                        onClick={() => {
-                                          setModelSettings({...modelSettings, aspectRatio: r.value});
-                                        }}
-                                        className={`flex flex-col items-center justify-center p-2 rounded-lg border transition-all ${
-                                          modelSettings.aspectRatio === r.value 
-                                            ? 'bg-blue-600/20 border-blue-500 text-blue-400' 
-                                            : 'bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-700 hover:border-slate-600'
-                                        }`}
-                                      >
-                                        <r.icon size={16} className="mb-1" />
-                                        <span className="text-[10px]">{r.label}</span>
-                                      </button>
-                                    ))}
-                                  </div>
-                                </div>
-
-                                {/* Resolution */}
-                                <div>
-                                  <label className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3 block">分辨率 (Image Size)</label>
-                                  <div className="flex bg-slate-800 p-1 rounded-lg border border-slate-700">
-                                    {/* 保持原图选项 - 只在有参考图时显示 */}
-                                    {resolvedAttachments.length > 0 && (
-                                      <button
-                                        type="button"
-                                        onClick={() => setModelSettings({...modelSettings, imageSize: ""})}
-                                        className={`flex-1 py-1.5 text-xs font-medium rounded-md transition-all ${
-                                          modelSettings.imageSize === ""
-                                            ? 'bg-blue-600 text-white shadow-sm'
-                                            : 'text-slate-400 hover:text-slate-200'
-                                        }`}
-                                        title="保持原图分辨率"
-                                      >
-                                        原图
-                                      </button>
-                                    )}
-                                    {sizes.map(size => (
-                                      <button
-                                        key={size}
-                                        type="button"
-                                        onClick={() => setModelSettings({...modelSettings, imageSize: size})}
-                                        className={`flex-1 py-1.5 text-xs font-medium rounded-md transition-all ${
-                                          modelSettings.imageSize === size
-                                            ? 'bg-blue-600 text-white shadow-sm'
-                                            : 'text-slate-400 hover:text-slate-200'
-                                        }`}
-                                      >
-                                        {size}
-                                      </button>
-                                    ))}
-                                  </div>
-                                  <p className="text-[10px] text-slate-500 mt-2 px-1">
-                                    2K/4K 会消耗更多资源；模型档位由思考强度控制。
-                                  </p>
-                                </div>
-                              </div>
-                            )}
-                         </div>
-
-                         <ThinkingLevelPicker
-                           value={thinkingLevel}
-                           onChange={setThinkingLevel}
-                           disabled={isRequestActive}
-                         />
-                       </>
-                     )}
-                  </div>
-
-                  {/* Right Actions (Intent, Send) */}
-                  <div className="flex items-center gap-2">
-                     {(inputValue.trim().length > 0 || resolvedAttachments.length > 0) && (
-                      <button
-                        type="button"
-                        onClick={handleRecognizeIntent}
-                        disabled={isRecognizingIntent || isRequestActive}
-                        className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1.5 text-xs font-medium transition-all ${
-                          isRecognizingIntent
-                            ? 'cursor-wait border-cyan-500/30 bg-cyan-900/20 text-cyan-300'
-                            : 'border-cyan-500/20 bg-cyan-500/5 text-cyan-400 hover:border-cyan-500/40 hover:bg-cyan-500/10 hover:text-cyan-300'
-                        } disabled:opacity-50`}
-                        title="结合当前文本和参考图识别可能意图"
-                      >
-                        {isRecognizingIntent
-                          ? <Loader2 size={14} className="animate-spin" />
-                          : <ScanSearch size={14} />}
-                        <span>意图</span>
-                      </button>
-                     )}
+                <input type="file" ref={fileInputRef} className="hidden" accept="image/*" multiple onChange={handleFileSelect} />
+                <div className="composer-footer">
+                  {aiSettings && <OperationModels
+                    ai={aiSettings} value={modelSettings} onChange={setModelSettings} disabled={isRequestActive}
+                    onUpload={() => fileInputRef.current?.click()}
+                    onRecognize={handleRecognizeIntent}
+                    canRecognize={!!inputValue.trim() || resolvedAttachments.length > 0}
+                    recognizing={isRecognizingIntent}
+                    configuration={<>
+                      <fieldset className="composer-config__field">
+                        <legend>宽高比</legend>
+                        <div className="composer-config__choices" role="group" aria-label="宽高比">
+                          {resolvedAttachments.length > 0 && <button type="button" aria-pressed={modelSettings.aspectRatio === ""} onClick={() => setModelSettings({ ...modelSettings, aspectRatio: "" })}>原图</button>}
+                          {ratios.map(r => <button key={r.value} type="button" aria-pressed={(modelSettings.aspectRatio || (resolvedAttachments.length ? "" : "1:1")) === r.value} onClick={() => setModelSettings({ ...modelSettings, aspectRatio: r.value })}>{r.label}</button>)}
+                        </div>
+                      </fieldset>
+                      <fieldset className="composer-config__field">
+                        <legend>分辨率</legend>
+                        <div className="composer-config__choices" role="group" aria-label="分辨率">
+                          {resolvedAttachments.length > 0 && <button type="button" aria-pressed={modelSettings.imageSize === ""} onClick={() => setModelSettings({ ...modelSettings, imageSize: "" })}>自动</button>}
+                          {sizes.map(size => <button key={size} type="button" aria-pressed={(modelSettings.imageSize || (resolvedAttachments.length ? "" : "1K")) === size} onClick={() => setModelSettings({ ...modelSettings, imageSize: size })}>{size}</button>)}
+                        </div>
+                        <p>实际输出尺寸受模型限制。</p>
+                      </fieldset>
+                      {supportsThinking && <fieldset className="composer-config__field">
+                        <legend>思考强度</legend>
+                        <div className="composer-config__choices" role="group" aria-label="思考强度">
+                          {thinkingLevels.map(level => <button key={level} type="button" aria-pressed={(thinkingLevels.includes(thinkingLevel) ? thinkingLevel : thinkingLevels[0]) === level} onClick={() => setThinkingLevel(level)}>{{ low: '低', medium: '中', high: '高', xhigh: '超高', max: '最高' }[level]}</button>)}
+                        </div>
+                      </fieldset>}
+                    </>}
+                  />}
                     <button
                       type="submit"
                       disabled={(!inputValue.trim() && resolvedAttachments.length === 0) && !isRequestActive}
@@ -1430,7 +1333,6 @@ const Sidebar: React.FC<SidebarProps> = ({
                         <Send size={18} />
                       )}
                     </button>
-                  </div>
                 </div>
 
                 {/* Drag Overlay */}

@@ -2,322 +2,344 @@ package provider
 
 import (
 	"artifex/core/types"
+	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
+	"math"
+	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
-	"cloud.google.com/go/auth"
-	"cloud.google.com/go/auth/credentials"
 	"google.golang.org/genai"
 )
 
-// ==================== Gemini 能力声明 ====================
-
-// geminiCapabilities Gemini 提供商的功能支持矩阵
-var geminiCapabilities = ProviderCapabilities{
-	GenerateImage:    true,
-	EditImage:        true,
-	RemoveBackground: true,
-	ReferenceImage:   true,
-}
-
-// ==================== GeminiProvider 实现 ====================
-
-// GeminiProvider Gemini AI 提供商
-// 支持 Gemini API 和 Vertex AI 双后端
+// Gemini API only. Models are selected from the user's catalog per operation.
 type GeminiProvider struct {
-	ctx      context.Context
-	client   *genai.Client
-	settings types.AISettings
+	client     *genai.Client
+	settings   types.AISettings
+	httpClient *http.Client
 }
 
-// NewGeminiProvider 创建 Gemini 提供商实例
-// 支持两种后端模式：
-//   - Gemini API：使用 API Key 认证
-//   - Vertex AI：使用 GCP 服务账号认证
-func NewGeminiProvider(ctx context.Context, settings types.AISettings) (*GeminiProvider, error) {
-	client, err := createGeminiClient(ctx, settings)
+func NewGeminiProvider(ctx context.Context, s types.AISettings) (*GeminiProvider, error) {
+	s = types.NormalizeGeminiSettings(s)
+	if err := types.ValidateModelDefinitions(s.GeminiModels); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(s.APIKey) == "" {
+		return nil, fmt.Errorf("请配置 Gemini API Key")
+	}
+	base := strings.TrimRight(strings.TrimSpace(s.GeminiBaseURL), "/")
+	version := "v1beta"
+	for _, v := range []string{"v1beta", "v1"} {
+		if strings.HasSuffix(base, "/"+v) {
+			base = strings.TrimSuffix(base, "/"+v)
+			version = v
+		}
+	}
+	if base != "" {
+		u, err := url.Parse(base)
+		if err != nil || u.Host == "" || !oneOf(u.Scheme, "http", "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+			return nil, fmt.Errorf("Gemini Base URL 无效")
+		}
+	}
+	hc := &http.Client{Timeout: 10 * time.Minute, Transport: http.DefaultTransport.(*http.Transport).Clone()}
+	attempts := int32(1)
+	client, err := genai.NewClient(ctx, &genai.ClientConfig{APIKey: s.APIKey, Backend: genai.BackendGeminiAPI, HTTPClient: hc, HTTPOptions: genai.HTTPOptions{BaseURL: base, APIVersion: version, RetryOptions: &genai.HTTPRetryOptions{Attempts: &attempts}}})
 	if err != nil {
 		return nil, err
 	}
-
-	return &GeminiProvider{
-		ctx:      ctx,
-		client:   client,
-		settings: settings,
-	}, nil
+	return &GeminiProvider{client: client, settings: s, httpClient: hc}, nil
 }
-
-// createGeminiClient 创建 Gemini 客户端（内部函数）
-func createGeminiClient(ctx context.Context, settings types.AISettings) (*genai.Client, error) {
-	var client *genai.Client
-	var err error
-	fmt.Printf("Creating Gemini client (UseVertexAI: %s)\n", settings.TextModel)
-
-	if settings.UseVertexAI {
-		// Vertex AI 模式
-		if settings.VertexProject == "" || settings.VertexLocation == "" {
-			return nil, fmt.Errorf("Vertex AI requires project and location")
-		}
-
-		// 解析 GCP 凭证
-		var cre *auth.Credentials
-		var credErr error
-		if settings.VertexCredentials != "" {
-			cre, credErr = credentials.DetectDefault(&credentials.DetectOptions{
-				Scopes:          []string{"https://www.googleapis.com/auth/cloud-platform"},
-				CredentialsJSON: []byte(settings.VertexCredentials),
-			})
-			if credErr != nil {
-				return nil, fmt.Errorf("failed to parse Vertex AI credentials: %w", credErr)
-			}
-		} else {
-			// 使用默认凭证（从环境变量或元数据服务器）
-			cre, credErr = credentials.DetectDefault(&credentials.DetectOptions{
-				Scopes: []string{"https://www.googleapis.com/auth/cloud-platform"},
-			})
-			if credErr != nil {
-				return nil, fmt.Errorf("failed to detect default credentials: %w", credErr)
-			}
-		}
-
-		// 创建 Vertex AI 客户端
-		client, err = genai.NewClient(ctx, &genai.ClientConfig{
-			Project:     settings.VertexProject,
-			Location:    settings.VertexLocation,
-			Backend:     genai.BackendVertexAI,
-			Credentials: cre,
-		})
-	} else {
-		// Gemini API 模式
-		if settings.APIKey == "" {
-			return nil, fmt.Errorf("Gemini API key not configured")
-		}
-
-		client, err = genai.NewClient(ctx, &genai.ClientConfig{
-			APIKey:  settings.APIKey,
-			Backend: genai.BackendGeminiAPI,
-		})
-	}
-
-	if err != nil {
-		return nil, fmt.Errorf("failed to create Gemini client: %w", err)
-	}
-
-	return client, nil
-}
-
-// Name 返回提供商名称
-func (p *GeminiProvider) Name() string {
-	return "gemini"
-}
-
-// GetCapabilities 返回提供商支持的功能
+func (p *GeminiProvider) Name() string { return "gemini" }
+func (p *GeminiProvider) Close() error { p.httpClient.CloseIdleConnections(); return nil }
 func (p *GeminiProvider) GetCapabilities() ProviderCapabilities {
-	return geminiCapabilities
+	return ProviderCapabilities{GenerateImage: true, EditImage: true, ReferenceImage: true, RemoveBackground: true}
 }
-
-// CheckAvailability 检测服务可用性
 func (p *GeminiProvider) CheckAvailability(ctx context.Context) (bool, error) {
-	if p.client == nil {
-		return false, fmt.Errorf("Gemini client not initialized")
-	}
-
-	// 尝试调用一个简单的 API 来检测服务是否可用
-	// 使用文本模型进行简单的测试请求
-	testPrompt := "test"
-	content := &genai.Content{
-		Parts: []*genai.Part{{Text: testPrompt}},
-		Role:  genai.RoleUser,
-	}
-
-	// 创建一个带超时的上下文
-	testCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	_, err := p.client.Models.GenerateContent(testCtx, p.settings.TextModel,
-		[]*genai.Content{content},
-		&genai.GenerateContentConfig{
-			MaxOutputTokens: 10, // 只请求少量输出以节省时间
-		})
-
-	if err != nil {
-		return false, fmt.Errorf("Gemini service unavailable: %w", err)
-	}
-
-	return true, nil
+	_, err := p.ListModels(ctx)
+	return err == nil, err
 }
-
-// Close 清理资源
-func (p *GeminiProvider) Close() error {
-	// genai.Client 没有显式的 Close 方法
-	p.client = nil
+func (p *GeminiProvider) ListModels(ctx context.Context) ([]string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	page, err := p.client.Models.List(ctx, &genai.ListModelsConfig{PageSize: 100})
+	if err != nil {
+		return nil, err
+	}
+	result := []string{}
+	for {
+		for _, m := range page.Items {
+			result = append(result, strings.TrimPrefix(m.Name, "models/"))
+		}
+		if page.NextPageToken == "" {
+			break
+		}
+		page, err = page.Next(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
+}
+func (p *GeminiProvider) selectModel(id, kind string) (string, error) {
+	if id == "" {
+		if kind == "image" {
+			id = p.settings.ImageModel
+		} else {
+			id = p.settings.TextModel
+		}
+	}
+	for _, m := range p.settings.GeminiModels {
+		if m.ModelID == id && m.Enabled && m.Modality == kind {
+			return id, nil
+		}
+	}
+	return "", fmt.Errorf("请选择已启用的%s模型", map[string]string{"image": "生图", "vision": "多模态"}[kind])
+}
+func (p *GeminiProvider) GenerateImage(ctx context.Context, params types.GenerateImageParams) (string, error) {
+	images := []string{}
+	if params.SketchImage != "" {
+		images = append(images, params.SketchImage)
+	}
+	if params.ReferenceImage != "" {
+		images = append(images, params.ReferenceImage)
+	}
+	operation := "generate"
+	if len(images) > 0 {
+		operation = "reference"
+	}
+	prompt := imageTaskPrompt(operation, params.Prompt, len(images))
+	if params.SketchImage != "" {
+		prompt += "\nThe first input is a composition sketch: preserve its layout and silhouette. Later inputs are visual references."
+	}
+	return p.generate(ctx, params.Model, prompt, images, params.ImageSize, params.AspectRatio, params.ThinkingLevel, operation)
+}
+func (p *GeminiProvider) EditMultiImages(ctx context.Context, params types.MultiImageEditParams) (string, error) {
+	if len(params.Images) == 0 {
+		return "", fmt.Errorf("至少需要一张输入图片")
+	}
+	operation := params.Operation
+	if operation == "" {
+		operation = "edit"
+	}
+	if !oneOf(operation, "edit", "reference", "extract_subject", "extract_mid", "extract_bg", "enhance", "expand") {
+		return "", fmt.Errorf("不支持的编辑操作")
+	}
+	prompt := imageTaskPrompt(operation, params.Prompt, len(params.Images))
+	images := append([]string(nil), params.Images...)
+	if operation == "expand" {
+		if params.MaskImage == "" {
+			return "", fmt.Errorf("扩图需要区域蒙版")
+		}
+		if err := validateMask(images[0], params.MaskImage); err != nil {
+			return "", err
+		}
+		guide, err := geminiMaskGuide(params.MaskImage)
+		if err != nil {
+			return "", err
+		}
+		images = append(images, guide)
+		prompt += "\nThe FINAL input is a region guide, not visual content. WHITE marks the original area to preserve and BLACK marks the new area to fill. Do not reproduce the guide in the result."
+		if params.OutputSize != "" {
+			var w, h int
+			if _, err := fmt.Sscanf(params.OutputSize, "%dx%d", &w, &h); err != nil || w <= 0 || h <= 0 {
+				return "", fmt.Errorf("扩图尺寸无效")
+			}
+			params.AspectRatio = nearestGeminiRatio(w, h)
+		}
+	}
+	return p.generate(ctx, params.Model, prompt, images, params.ImageSize, params.AspectRatio, params.ThinkingLevel, operation)
+}
+func geminiThinking(model, level string) *genai.ThinkingConfig {
+	if strings.Contains(model, "gemini-3.1-flash") && strings.Contains(model, "image") {
+		effort := genai.ThinkingLevelMinimal
+		if level == "high" {
+			effort = genai.ThinkingLevelHigh
+		}
+		return &genai.ThinkingConfig{ThinkingLevel: effort}
+	}
+	// Other image models do not expose a documented configurable thinking level.
 	return nil
 }
-
-// GenerateImage 生成图像
-// 参数说明：
-//   - prompt: 提示词，描述要生成的图像内容
-//   - imageSize: 图片尺寸，可选值："1K", "2K", "4K"
-//   - aspectRatio: 宽高比，可选值："1:1", "16:9", "9:16", "3:4", "4:3"
-//
-// 注意：Gemini Provider 仅使用上述三个参数，忽略其他参数（如 ReferenceImage、SketchImage）
-func (p *GeminiProvider) GenerateImage(ctx context.Context, params types.GenerateImageParams) (string, error) {
-	// 参数验证
-	if params.Prompt == "" {
-		return "", fmt.Errorf("prompt is required")
-	}
-	if params.ImageSize == "" {
-		return "", fmt.Errorf("imageSize is required")
-	}
-	if params.AspectRatio == "" {
-		return "", fmt.Errorf("aspectRatio is required")
-	}
-
-	// 构建内容部分（仅使用提示词）
-	content := &genai.Content{
-		Parts: []*genai.Part{{Text: params.Prompt}},
-		Role:  genai.RoleUser,
-	}
-
-	// 设置生成参数
-	temperature := float32(0.9)
-	topP := float32(0.95)
-
-	// 调用 Gemini API
-	response, err := p.client.Models.GenerateContent(ctx, p.settings.ImageModel,
-		[]*genai.Content{content},
-		&genai.GenerateContentConfig{
-			Temperature:        &temperature,
-			TopP:               &topP,
-			MaxOutputTokens:    32768,
-			ResponseModalities: []string{"text", "image"},
-			ImageConfig: &genai.ImageConfig{
-				ImageSize:   params.ImageSize,
-				AspectRatio: params.AspectRatio,
-			},
-		})
-
+func (p *GeminiProvider) generate(ctx context.Context, selection, prompt string, images []string, size, ratio, thinking, operation string) (string, error) {
+	model, err := p.selectModel(selection, "image")
 	if err != nil {
-		return "", fmt.Errorf("gemini API error: %w", err)
+		return "", err
 	}
-
-	return extractImageFromGeminiResponse(response)
+	maxImages := 14
+	if strings.Contains(model, "gemini-2.5") {
+		maxImages = 3
+	}
+	if len(images) > maxImages {
+		return "", fmt.Errorf("当前模型最多支持 %d 张输入图片（含扩图区域引导图）", maxImages)
+	}
+	if size != "" && !oneOf(size, "1K", "2K", "4K") {
+		return "", fmt.Errorf("不支持的图片尺寸")
+	}
+	if ratio != "" && !oneOf(ratio, "1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9") {
+		return "", fmt.Errorf("不支持的宽高比")
+	}
+	if strings.Contains(model, "gemini-2.5") || strings.Contains(model, "flash-lite-image") {
+		if size != "" && size != "1K" {
+			return "", fmt.Errorf("当前模型仅支持 1K，请选择支持 2K/4K 的 Gemini 图片模型")
+		}
+		size = ""
+	}
+	parts, err := geminiParts(prompt, images)
+	if err != nil {
+		return "", err
+	}
+	// Image models default to text + image output. Omit the optional modality
+	// override: some Gemini-compatible gateways reject it during translation.
+	config := &genai.GenerateContentConfig{ThinkingConfig: geminiThinking(model, thinking)}
+	if size != "" || ratio != "" {
+		config.ImageConfig = &genai.ImageConfig{ImageSize: size, AspectRatio: ratio}
+	}
+	contents := []*genai.Content{{Role: genai.RoleUser, Parts: parts}}
+	response, err := p.client.Models.GenerateContent(ctx, model, contents, config)
+	if err != nil {
+		return "", err
+	}
+	result, err := extractImageFromGeminiResponse(response)
+	if err != nil {
+		return "", err
+	}
+	if operation == "extract_subject" || operation == "extract_mid" {
+		if !hasTransparency(result) {
+			return "", fmt.Errorf("Gemini 未返回真实透明背景；请改用支持透明输出的 GPT Image 模型完成抠图")
+		}
+	}
+	return result, nil
 }
-
-// EditMultiImages 多图编辑/融合
-// 支持单图或多图编辑（单图时也使用此方法）
-// 参数说明：
-//   - images: base64 编码的图像数组（支持单图或多图）
-//   - prompt: 编辑提示词，描述要进行的编辑操作
-//   - imageSize: 图片尺寸，可选值："1K", "2K", "4K"（可选）
-//   - aspectRatio: 宽高比，可选值："1:1", "16:9", "9:16", "3:4", "4:3"（可选）
-func (p *GeminiProvider) EditMultiImages(ctx context.Context, params types.MultiImageEditParams) (string, error) {
-	// 参数验证
-	if len(params.Images) < 1 {
-		return "", fmt.Errorf("at least 1 image is required")
-	}
-	if params.Prompt == "" {
-		return "", fmt.Errorf("prompt is required")
-	}
-
-	// 构建请求部分：先添加提示词
-	parts := []*genai.Part{
-		{Text: params.Prompt},
-	}
-
-	// 添加所有图片
-	for i, img := range params.Images {
-		imageData := extractBase64Data(img)
-		decodedData, err := base64.StdEncoding.DecodeString(imageData)
+func geminiParts(prompt string, images []string) ([]*genai.Part, error) {
+	parts := []*genai.Part{{Text: prompt}}
+	total := len(prompt)
+	for i, src := range images {
+		data, format, err := decodeImageData(src)
 		if err != nil {
-			return "", fmt.Errorf("failed to decode image %d: %w", i, err)
+			return nil, fmt.Errorf("图片 %d: %w", i+1, err)
 		}
-
-		parts = append(parts, &genai.Part{
-			InlineData: &genai.Blob{
-				MIMEType: "image/png",
-				Data:     decodedData,
-			},
-		})
-	}
-
-	content := &genai.Content{
-		Parts: parts,
-		Role:  genai.RoleUser,
-	}
-
-	// 设置生成参数
-	temperature := float32(0.95)
-	topP := float32(0.95)
-
-	// 构建 ImageConfig（如果提供了 ImageSize 或 AspectRatio）
-	var imageConfig *genai.ImageConfig
-	if params.ImageSize != "" || params.AspectRatio != "" {
-		imageConfig = &genai.ImageConfig{}
-		if params.ImageSize != "" {
-			imageConfig.ImageSize = params.ImageSize
+		total += base64.StdEncoding.EncodedLen(len(data))
+		if total > 20*1024*1024 {
+			return nil, fmt.Errorf("Gemini 内联请求过大，请压缩图片后重试（总计小于 20 MB）")
 		}
-		if params.AspectRatio != "" {
-			imageConfig.AspectRatio = params.AspectRatio
-		}
+		parts = append(parts, &genai.Part{InlineData: &genai.Blob{MIMEType: "image/" + format, Data: data}})
 	}
-
-	// 调用 API
-	config := &genai.GenerateContentConfig{
-		Temperature:        &temperature,
-		TopP:               &topP,
-		MaxOutputTokens:    32768,
-		ResponseModalities: []string{"text", "image"},
-	}
-
-	// 如果提供了 ImageConfig，添加到配置中
-	if imageConfig != nil {
-		config.ImageConfig = imageConfig
-	}
-
-	response, err := p.client.Models.GenerateContent(ctx, p.settings.ImageModel,
-		[]*genai.Content{content},
-		config)
-
-	if err != nil {
-		return "", fmt.Errorf("Gemini multi-image edit API error: %w", err)
-	}
-
-	return extractImageFromGeminiResponse(response)
+	return parts, nil
 }
-
-// ==================== 辅助函数 ====================
-
-// extractBase64Data 从 data URL 中提取 base64 数据
-func extractBase64Data(dataURL string) string {
-	parts := strings.Split(dataURL, ",")
-	if len(parts) == 2 {
-		return parts[1]
-	}
-	return dataURL
-}
-
-// extractImageFromGeminiResponse 从 Gemini 响应中提取图像数据
 func extractImageFromGeminiResponse(response *genai.GenerateContentResponse) (string, error) {
-	if response == nil || len(response.Candidates) == 0 {
-		return "", fmt.Errorf("no content generated")
+	if response == nil {
+		return "", fmt.Errorf("Gemini 未返回内容")
 	}
-
-	for _, candidate := range response.Candidates {
-		if candidate.Content == nil {
+	for _, c := range response.Candidates {
+		if c.FinishReason != "" && c.FinishReason != genai.FinishReasonStop {
+			return "", fmt.Errorf("Gemini 请求未完成: %s", c.FinishReason)
+		}
+		if c.Content == nil {
 			continue
 		}
-
-		for _, part := range candidate.Content.Parts {
-			if part.InlineData != nil && strings.HasPrefix(part.InlineData.MIMEType, "image/") {
-				encoded := base64.StdEncoding.EncodeToString(part.InlineData.Data)
-				return fmt.Sprintf("data:%s;base64,%s", part.InlineData.MIMEType, encoded), nil
+		for _, part := range c.Content.Parts {
+			if !part.Thought && part.InlineData != nil && strings.HasPrefix(part.InlineData.MIMEType, "image/") {
+				return imageDataURL(base64.StdEncoding.EncodeToString(part.InlineData.Data), "")
 			}
 		}
 	}
+	if response.PromptFeedback != nil {
+		return "", fmt.Errorf("Gemini 未生成图片: %s", response.PromptFeedback.BlockReason)
+	}
+	return "", fmt.Errorf("Gemini 未返回图片；请确认选择的是支持图片输出的模型")
+}
+func (p *GeminiProvider) RecognizeIntent(ctx context.Context, params types.IntentRecognitionParams) (string, error) {
+	model, err := p.selectModel(params.Model, "vision")
+	if err != nil {
+		return "", err
+	}
+	parts, err := geminiParts(intentInstructions+"\n用户输入：\n"+params.Message, params.ReferenceImages)
+	if err != nil {
+		return "", err
+	}
 
-	return "", fmt.Errorf("no image data found in response")
+	config := &genai.GenerateContentConfig{ResponseMIMEType: "application/json", ResponseJsonSchema: intentSchema()}
+	contents := []*genai.Content{{Role: genai.RoleUser, Parts: parts}}
+	response, err := p.client.Models.GenerateContent(ctx, model, contents, config)
+	if err != nil {
+		return "", err
+	}
+	text := response.Text()
+
+	var result types.IntentRecognitionResponse
+	if err = json.Unmarshal([]byte(text), &result); err != nil {
+		return "", fmt.Errorf("意图识别返回格式错误: %w", err)
+	}
+	if len(result.Intents) != 3 {
+		return "", fmt.Errorf("意图识别应返回 3 个候选方向")
+	}
+	for _, item := range result.Intents {
+		if strings.TrimSpace(item.Title) == "" || strings.TrimSpace(item.Prompt) == "" || strings.TrimSpace(item.Description) == "" {
+			return "", fmt.Errorf("意图识别返回内容不完整")
+		}
+	}
+	data, err := json.Marshal(result)
+	return string(data), err
+}
+func geminiMaskGuide(mask string) (string, error) {
+	data, _, err := decodeImageData(mask)
+	if err != nil {
+		return "", err
+	}
+	im, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return "", err
+	}
+	guide := image.NewGray(im.Bounds())
+	for y := im.Bounds().Min.Y; y < im.Bounds().Max.Y; y++ {
+		for x := im.Bounds().Min.X; x < im.Bounds().Max.X; x++ {
+			_, _, _, a := im.At(x, y).RGBA()
+			guide.SetGray(x, y, color.Gray{Y: uint8(a >> 8)})
+		}
+	}
+	var out bytes.Buffer
+	if err = png.Encode(&out, guide); err != nil {
+		return "", err
+	}
+	return "data:image/png;base64," + base64.StdEncoding.EncodeToString(out.Bytes()), nil
+}
+func hasTransparency(src string) bool {
+	data, _, err := decodeImageData(src)
+	if err != nil {
+		return false
+	}
+	im, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return false
+	}
+	for y := im.Bounds().Min.Y; y < im.Bounds().Max.Y; y++ {
+		for x := im.Bounds().Min.X; x < im.Bounds().Max.X; x++ {
+			_, _, _, a := im.At(x, y).RGBA()
+			if a < 65535 {
+				return true
+			}
+		}
+	}
+	return false
+}
+func nearestGeminiRatio(w, h int) string {
+	result := "1:1"
+	best := math.MaxFloat64
+	for _, ratio := range []string{"1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"} {
+		var a, b float64
+		fmt.Sscanf(ratio, "%f:%f", &a, &b)
+		delta := math.Abs(math.Log((float64(w) / float64(h)) / (a / b)))
+		if delta < best {
+			best = delta
+			result = ratio
+		}
+	}
+	return result
 }

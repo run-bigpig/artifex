@@ -3,550 +3,344 @@ package provider
 import (
 	"artifex/core/types"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
-	openai "github.com/sashabaranov/go-openai"
+	openai "github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
+	"github.com/openai/openai-go/v3/responses"
 )
 
-// ==================== OpenAI 能力声明 ====================
-
-// openaiImageAPICapabilities 使用专用 Image API 时的功能支持矩阵
-var openaiImageAPICapabilities = ProviderCapabilities{
-	GenerateImage:    true,
-	EditImage:        false, // DALL-E 3 不支持，GPT Image 1 需要单独配置
-	RemoveBackground: false,
-	ReferenceImage:   false,
-}
-
-// openaiChatCapabilities 使用 Chat API 时的功能支持矩阵（类似 Gemini）
-var openaiChatCapabilities = ProviderCapabilities{
-	GenerateImage:    true,
-	EditImage:        true,
-	RemoveBackground: true,
-	ReferenceImage:   true,
-}
-
-// ==================== OpenAIProvider 实现 ====================
-
-// OpenAIProvider OpenAI AI 提供商
-// 支持两种模式：
-//   - Image API 模式：使用专用的 /v1/images/* 端点（DALL-E、GPT Image 1）
-//   - Chat 模式：使用 /v1/chat/completions 端点（多模态模型）
+// One connection, with endpoint routing derived from the selected model.
 type OpenAIProvider struct {
-	ctx         context.Context
-	chatClient  *openai.Client // 用于 Chat/文本相关的 API
-	imageClient *openai.Client // 用于图像相关的 API
-	settings    types.AISettings
-	imageMode   string // 实际使用的图像模式
+	client     openai.Client
+	settings   types.AISettings
+	httpClient *http.Client
 }
 
-// NewOpenAIProvider 创建 OpenAI 提供商实例
 func NewOpenAIProvider(ctx context.Context, settings types.AISettings) (*OpenAIProvider, error) {
-	apiKey := settings.OpenAIAPIKey
-	if apiKey == "" {
-		return nil, fmt.Errorf("OpenAI API key not configured")
+	settings = types.NormalizeOpenAISettings(settings)
+	if err := types.ValidateModelDefinitions(settings.OpenAIModels); err != nil {
+		return nil, err
 	}
-
-	// 创建 Chat 客户端（用于文本/聊天相关 API）
-	chatConfig := openai.DefaultConfig(apiKey)
-	if settings.OpenAIBaseURL != "" {
-		chatConfig.BaseURL = settings.OpenAIBaseURL
+	if strings.TrimSpace(settings.OpenAIAPIKey) == "" {
+		return nil, fmt.Errorf("请配置 OpenAI API Key")
 	}
-	chatClient := openai.NewClientWithConfig(chatConfig)
-
-	// 创建 Image 客户端（用于图像相关 API）
-	// 如果配置了独立的图像 API Key 或 Base URL，则使用独立配置
-	imageAPIKey := settings.OpenAIImageAPIKey
-	if imageAPIKey == "" {
-		imageAPIKey = apiKey // 未配置独立 Key 时使用通用 Key
+	base := strings.TrimRight(strings.TrimSpace(settings.OpenAIBaseURL), "/")
+	if base == "" {
+		base = "https://api.openai.com/v1"
 	}
-
-	imageConfig := openai.DefaultConfig(imageAPIKey)
-	if settings.OpenAIImageBaseURL != "" {
-		// 使用独立的图像 API Base URL
-		imageConfig.BaseURL = settings.OpenAIImageBaseURL
-	} else if settings.OpenAIBaseURL != "" {
-		// 未配置独立 URL 时使用通用 Base URL
-		imageConfig.BaseURL = settings.OpenAIBaseURL
+	parsed, err := url.Parse(base)
+	if err != nil || parsed.Host == "" || !oneOf(parsed.Scheme, "http", "https") || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.User != nil {
+		return nil, fmt.Errorf("Base URL 必须为有效的 HTTP(S) 服务地址，不应包含密钥、查询参数或片段")
 	}
-	imageClient := openai.NewClientWithConfig(imageConfig)
-
-	// 确定图像模式
-	imageMode := determineImageMode(settings)
-
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	client := &http.Client{Timeout: 10 * time.Minute, Transport: transport}
 	return &OpenAIProvider{
-		ctx:         ctx,
-		chatClient:  chatClient,
-		imageClient: imageClient,
-		settings:    settings,
-		imageMode:   imageMode,
+		client:   openai.NewClient(option.WithAPIKey(settings.OpenAIAPIKey), option.WithBaseURL(base+"/"), option.WithHTTPClient(client), option.WithMaxRetries(0)),
+		settings: settings, httpClient: client,
 	}, nil
 }
 
-// determineImageMode 根据配置和模型名称确定图像模式
-func determineImageMode(settings types.AISettings) string {
-	mode := settings.OpenAIImageMode
-
-	// 如果明确指定了模式，直接使用
-	if mode == types.OpenAIImageModeImageAPI || mode == types.OpenAIImageModeChat {
-		return mode
-	}
-
-	// 自动判断模式（默认）
-	model := strings.ToLower(settings.OpenAIImageModel)
-
-	// 如果模型名包含这些关键字，使用专用 Image API
-	imageAPIModels := []string{"dall-e", "dalle", "gpt-image"}
-	for _, keyword := range imageAPIModels {
-		if strings.Contains(model, keyword) {
-			return types.OpenAIImageModeImageAPI
-		}
-	}
-
-	// 默认使用 Chat 模式（更通用，支持第三方多模态 API）
-	return types.OpenAIImageModeChat
+func (p *OpenAIProvider) Name() string { return "openai" }
+func (p *OpenAIProvider) Close() error { p.httpClient.CloseIdleConnections(); return nil }
+func isReasoning(model string) bool {
+	return strings.HasPrefix(model, "gpt-5") || strings.HasPrefix(model, "gpt-6")
 }
-
-// Name 返回提供商名称
-func (p *OpenAIProvider) Name() string {
-	return "openai"
+func isLegacyImage(model string) bool {
+	return strings.Contains(strings.ToLower(model), "dall-e") || strings.Contains(strings.ToLower(model), "dalle")
 }
-
-// GetCapabilities 返回提供商支持的功能
-// 根据当前配置的模式返回不同的能力
 func (p *OpenAIProvider) GetCapabilities() ProviderCapabilities {
-	if p.imageMode == types.OpenAIImageModeChat {
-		return openaiChatCapabilities
-	}
-	return openaiImageAPICapabilities
+	return ProviderCapabilities{GenerateImage: true, EditImage: true, RemoveBackground: true, ReferenceImage: true}
 }
 
-// CheckAvailability 检测服务可用性
+// Model discovery verifies the configured connection and model visibility without
+// incurring an image generation charge. It is not a generation smoke test.
 func (p *OpenAIProvider) CheckAvailability(ctx context.Context) (bool, error) {
-	if p.chatClient == nil {
-		return false, fmt.Errorf("OpenAI chat client not initialized")
-	}
-
-	// 创建一个带超时的上下文
-	testCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	// 尝试调用一个简单的 API 来检测服务是否可用
-	// 使用文本模型进行简单的测试请求
-	req := openai.ChatCompletionRequest{
-		Model: p.settings.OpenAITextModel,
-		Messages: []openai.ChatCompletionMessage{
-			{
-				Role:    openai.ChatMessageRoleUser,
-				Content: "test",
-			},
-		},
-		MaxTokens: 5, // 只请求少量输出以节省时间
-	}
-
-	// 根据配置决定是否使用流式请求
-	if p.settings.OpenAITextStream {
-		stream, err := p.chatClient.CreateChatCompletionStream(testCtx, req)
-		if err != nil {
-			return false, fmt.Errorf("OpenAI service unavailable: %w", err)
-		}
-		stream.Close()
-		return true, nil
-	}
-
-	_, err := p.chatClient.CreateChatCompletion(testCtx, req)
-	if err != nil {
-		return false, fmt.Errorf("OpenAI service unavailable: %w", err)
-	}
-
-	return true, nil
+	_, err := p.ListModels(ctx)
+	return err == nil, err
 }
 
-// Close 清理资源
-func (p *OpenAIProvider) Close() error {
-	p.chatClient = nil
-	p.imageClient = nil
-	return nil
-}
-
-// ==================== 图像生成 ====================
-
-// GenerateImage 生成图像
 func (p *OpenAIProvider) GenerateImage(ctx context.Context, params types.GenerateImageParams) (string, error) {
-	if p.imageMode == types.OpenAIImageModeChat {
-		return p.generateImageViaChat(ctx, params)
-	}
-	return p.generateImageViaImageAPI(ctx, params)
-}
-
-// generateImageViaImageAPI 通过专用 Image API 生成图像
-func (p *OpenAIProvider) generateImageViaImageAPI(ctx context.Context, params types.GenerateImageParams) (string, error) {
-	// 映射图像尺寸
-	size := mapOpenAIImageSize(params.ImageSize, params.AspectRatio)
-
-	// 确定使用的模型
-	model := p.settings.OpenAIImageModel
-	if model == "" {
-		model = openai.CreateImageModelDallE3
-	}
-
-	// 构建请求
-	req := openai.ImageRequest{
-		Prompt:         params.Prompt,
-		Model:          model,
-		N:              1,
-		Size:           size,
-		ResponseFormat: openai.CreateImageResponseFormatB64JSON,
-		Quality:        openai.CreateImageQualityHD,
-		Style:          openai.CreateImageStyleVivid,
-	}
-
-	// 调用 Image API（使用 imageClient）
-	resp, err := p.imageClient.CreateImage(ctx, req)
+	selected, err := p.forImageModel(params.Model, params.ImageToolModel)
 	if err != nil {
-		return "", fmt.Errorf("OpenAI image generation error: %w", err)
+		return "", err
 	}
-
-	if len(resp.Data) == 0 {
-		return "", fmt.Errorf("no image data returned from OpenAI")
-	}
-
-	return "data:image/png;base64," + resp.Data[0].B64JSON, nil
-}
-
-// generateImageViaChat 通过 Chat Completion API 生成图像
-func (p *OpenAIProvider) generateImageViaChat(ctx context.Context, params types.GenerateImageParams) (string, error) {
-	// 构建消息内容
-	var multiContent []openai.ChatMessagePart
-
-	// 添加文本提示
-	multiContent = append(multiContent, openai.ChatMessagePart{
-		Type: openai.ChatMessagePartTypeText,
-		Text: buildImageGenerationPrompt(params.Prompt, params.AspectRatio),
-	})
-
-	// 如果有草图图像，添加到请求中
+	p = selected
+	images := []string{}
 	if params.SketchImage != "" {
-		imageURL, err := buildImageURL(params.SketchImage)
-		if err != nil {
-			return "", fmt.Errorf("failed to process sketch image: %w", err)
-		}
-		multiContent = append(multiContent, openai.ChatMessagePart{
-			Type: openai.ChatMessagePartTypeImageURL,
-			ImageURL: &openai.ChatMessageImageURL{
-				URL:    imageURL,
-				Detail: openai.ImageURLDetailHigh,
-			},
-		})
+		images = append(images, params.SketchImage)
 	}
-
-	// 如果有参考图像，添加到请求中
 	if params.ReferenceImage != "" {
-		imageURL, err := buildImageURL(params.ReferenceImage)
-		if err != nil {
-			return "", fmt.Errorf("failed to process reference image: %w", err)
-		}
-		multiContent = append(multiContent, openai.ChatMessagePart{
-			Type: openai.ChatMessagePartTypeImageURL,
-			ImageURL: &openai.ChatMessageImageURL{
-				URL:    imageURL,
-				Detail: openai.ImageURLDetailHigh,
-			},
-		})
+		images = append(images, params.ReferenceImage)
 	}
-
-	// 确定使用的模型
-	model := p.settings.OpenAIImageModel
-	if model == "" {
-		model = "gpt-4o" // 默认使用 GPT-4o
+	operation := "generate"
+	if len(images) > 0 {
+		operation = "reference"
 	}
-
-	// 构建聊天请求
-	req := openai.ChatCompletionRequest{
-		Model: model,
-		Messages: []openai.ChatCompletionMessage{
-			{
-				Role:         openai.ChatMessageRoleUser,
-				MultiContent: multiContent,
-			},
-		},
-		MaxTokens: 131072,
+	prompt := imageTaskPrompt(operation, params.Prompt, len(images))
+	if params.SketchImage != "" {
+		prompt += "\nThe first input is a composition sketch. Preserve its layout and silhouette; use subsequent images only as visual references unless explicitly requested otherwise."
 	}
-
-	// 根据配置决定是否使用流式请求（图像模型流式模式）
-	if p.settings.OpenAIImageStream {
-		content, err := p.createChatCompletionStream(ctx, p.imageClient, req)
-		if err != nil {
-			return "", err
-		}
-		// 从流式响应中提取图像
-		return extractImageFromChatContent(content)
-	}
-
-	// 调用图像 API（使用 imageClient，因为这是图像生成操作）
-	resp, err := p.imageClient.CreateChatCompletion(ctx, req)
-	if err != nil {
-		return "", fmt.Errorf("OpenAI chat completion error: %w", err)
-	}
-
-	// 从响应中提取图像
-	return extractImageFromChatResponse(resp)
+	return p.runImage(ctx, prompt, images, "", params.ImageSize, params.AspectRatio, "", params.ThinkingLevel, operation)
 }
 
-// ==================== 图像编辑 ====================
-
-// EditMultiImages 多图编辑/融合
-// 支持单图或多图编辑（单图时也使用此方法）
 func (p *OpenAIProvider) EditMultiImages(ctx context.Context, params types.MultiImageEditParams) (string, error) {
-	if len(params.Images) < 1 {
-		return "", fmt.Errorf("at least 1 image is required")
+	selected, err := p.forImageModel(params.Model, params.ImageToolModel)
+	if err != nil {
+		return "", err
 	}
-
-	if p.imageMode == types.OpenAIImageModeChat {
-		return p.editMultiImagesViaChat(ctx, params)
+	p = selected
+	if len(params.Images) == 0 {
+		return "", fmt.Errorf("至少需要一张输入图片")
 	}
-	return "", fmt.Errorf("multi-image editing is only supported in 'chat' mode. Please set openaiImageMode to 'chat'")
+	if isLegacyImage(p.settings.OpenAIImageModel) {
+		return "", fmt.Errorf("模型 %s 不支持编辑，请选择 GPT Image 或多模态模型", p.settings.OpenAIImageModel)
+	}
+	operation := params.Operation
+	if operation == "" {
+		operation = "edit"
+	}
+	switch operation {
+	case "edit", "reference", "extract_subject", "extract_mid", "extract_bg", "enhance", "expand":
+	default:
+		return "", fmt.Errorf("不支持的图片操作: %s", operation)
+	}
+	if operation == "expand" && params.MaskImage == "" {
+		return "", fmt.Errorf("扩图需要区域蒙版，请重新选择扩图区域")
+	}
+	return p.runImage(ctx, imageTaskPrompt(operation, params.Prompt, len(params.Images)), params.Images, params.MaskImage, params.ImageSize, params.AspectRatio, params.OutputSize, params.ThinkingLevel, operation)
 }
 
-// editMultiImagesViaChat 通过 Chat Completion API 进行多图编辑
-// 支持单图或多图编辑
-func (p *OpenAIProvider) editMultiImagesViaChat(ctx context.Context, params types.MultiImageEditParams) (string, error) {
-	if len(params.Images) < 1 {
-		return "", fmt.Errorf("at least 1 image is required")
+func (p *OpenAIProvider) runImage(ctx context.Context, prompt string, images []string, mask, level, ratio, size, thinking, operation string) (string, error) {
+	if len(images) > 16 {
+		return "", fmt.Errorf("一次最多支持 16 张输入图片")
 	}
-
-	// 构建消息内容
-	var multiContent []openai.ChatMessagePart
-
-	// 添加提示词
-	multiContent = append(multiContent, openai.ChatMessagePart{
-		Type: openai.ChatMessagePartTypeText,
-		Text: params.Prompt,
-	})
-
-	// 添加所有图片
-	for i, img := range params.Images {
-		imageURL, err := buildImageURL(img)
-		if err != nil {
-			return "", fmt.Errorf("failed to process image %d: %w", i, err)
-		}
-		multiContent = append(multiContent, openai.ChatMessagePart{
-			Type: openai.ChatMessagePartTypeImageURL,
-			ImageURL: &openai.ChatMessageImageURL{
-				URL:    imageURL,
-				Detail: openai.ImageURLDetailHigh,
-			},
-		})
+	if len([]rune(prompt)) > 32000 {
+		return "", fmt.Errorf("提示词过长，请缩短到 30000 字符以内")
 	}
-
-	// 确定使用的模型
+	normalized, err := normalizeOpenAIInputs(images)
+	if err != nil {
+		return "", err
+	}
+	images = normalized
 	model := p.settings.OpenAIImageModel
-	if model == "" {
-		model = "gpt-4o"
-	}
 
-	// 构建聊天请求
-	req := openai.ChatCompletionRequest{
-		Model: model,
-		Messages: []openai.ChatCompletionMessage{
-			{
-				Role:         openai.ChatMessageRoleUser,
-				MultiContent: multiContent,
-			},
-		},
-		MaxTokens: 4096,
+	imageModel := model
+	if p.modelKind(model) == "multimodal" {
+		imageModel = p.settings.OpenAIImageToolModel
+		if p.modelKind(imageModel) != "image" {
+			return "", fmt.Errorf("图片工具模型须使用 GPT Image，当前为 %s", imageModel)
+		}
 	}
+	opts, err := p.imageOptions(imageModel, level, ratio, size, operation, images)
+	if err != nil {
+		return "", err
+	}
+	if mask != "" {
+		if err = validateMask(images[0], mask); err != nil {
+			return "", err
+		}
+	}
+	if p.modelKind(model) == "multimodal" {
+		return p.responseImage(ctx, model, imageModel, prompt, images, mask, thinking, opts)
+	}
+	if len(images) > 0 {
+		return p.editImage(ctx, imageModel, prompt, images, mask, opts)
+	}
+	req := openai.ImageGenerateParams{Model: openai.ImageModel(imageModel), Prompt: prompt, N: openai.Int(1), Size: openai.ImageGenerateParamsSize(opts.size)}
+	if isLegacyImage(imageModel) {
+		req.ResponseFormat = "b64_json"
+		if strings.Contains(imageModel, "3") {
+			req.Quality = "hd"
+			req.Style = "vivid"
+		}
+	} else {
+		req.Quality = openai.ImageGenerateParamsQuality(opts.quality)
+		req.Background = openai.ImageGenerateParamsBackground(opts.background)
+		req.OutputFormat = openai.ImageGenerateParamsOutputFormat(opts.format)
+		if opts.format != "png" && p.settings.OpenAIImageCompression != nil {
+			req.OutputCompression = openai.Int(*p.settings.OpenAIImageCompression)
+		}
+	}
+	resp, err := p.client.Images.Generate(ctx, req)
+	if err != nil {
+		return "", err
+	}
+	return imageResult(resp, opts.format)
+}
 
-	// 根据配置决定是否使用流式请求（图像模型流式模式）
-	if p.settings.OpenAIImageStream {
-		content, err := p.createChatCompletionStream(ctx, p.imageClient, req)
+func (p *OpenAIProvider) editImage(ctx context.Context, model, prompt string, images []string, mask string, o imageOptions) (string, error) {
+	readers := make([]io.Reader, 0, len(images))
+	for _, src := range images {
+		reader, err := imageFile(ctx, src, p.httpClient)
 		if err != nil {
 			return "", err
 		}
-		// 从流式响应中提取图像
-		return extractImageFromChatContent(content)
+		readers = append(readers, reader)
 	}
-
-	// 调用图像 API（使用 imageClient，因为这是多图编辑操作）
-	resp, err := p.imageClient.CreateChatCompletion(ctx, req)
-	if err != nil {
-		return "", fmt.Errorf("OpenAI chat completion error: %w", err)
-	}
-
-	return extractImageFromChatResponse(resp)
-}
-
-// ==================== 辅助函数 ====================
-
-// mapOpenAIImageSize 映射图像尺寸到 OpenAI 格式
-func mapOpenAIImageSize(sizeLevel, aspectRatio string) string {
-	// DALL-E 3 支持的尺寸: 1024x1024, 1792x1024, 1024x1792
-	switch aspectRatio {
-	case "1:1":
-		return openai.CreateImageSize1024x1024
-	case "16:9", "4:3":
-		return openai.CreateImageSize1792x1024
-	case "9:16", "3:4":
-		return openai.CreateImageSize1024x1792
-	default:
-		return openai.CreateImageSize1024x1024
-	}
-}
-
-// buildImageURL 构建图像 URL（支持 base64 和 http URL）
-func buildImageURL(imageData string) (string, error) {
-	// 如果已经是 data URL，直接返回
-	if strings.HasPrefix(imageData, "data:") {
-		return imageData, nil
-	}
-
-	// 如果是 http/https URL，直接返回
-	if strings.HasPrefix(imageData, "http://") || strings.HasPrefix(imageData, "https://") {
-		return imageData, nil
-	}
-
-	// 否则假设是纯 base64 数据，添加前缀
-	return "data:image/png;base64," + imageData, nil
-}
-
-// buildImageGenerationPrompt 构建图像生成提示
-func buildImageGenerationPrompt(prompt, aspectRatio string) string {
-	// 添加比例信息到提示中
-	if aspectRatio != "" && aspectRatio != "1:1" {
-		return fmt.Sprintf("%s (aspect ratio: %s)", prompt, aspectRatio)
-	}
-	return prompt
-}
-
-// extractImageFromChatResponse 从 Chat Completion 响应中提取图像
-// 注意：标准 OpenAI Chat API 不会返回图像，这个函数主要用于
-// 第三方多模态 API 的兼容处理
-func extractImageFromChatResponse(resp openai.ChatCompletionResponse) (string, error) {
-	if len(resp.Choices) == 0 {
-		return "", fmt.Errorf("no response from chat completion")
-	}
-
-	content := resp.Choices[0].Message.Content
-
-	// 尝试从响应中提取 base64 图像数据
-	// 一些第三方 API 可能在内容中返回 base64 编码的图像
-
-	// 检查是否是 base64 图像
-	if strings.HasPrefix(content, "data:image/") {
-		return content, nil
-	}
-
-	// 检查内容是否看起来像 base64（无前缀）
-	if looksLikeBase64Image(content) {
-		return "data:image/png;base64," + content, nil
-	}
-
-	// 尝试从 markdown 图片标记中提取
-	if imageURL := extractImageFromMarkdown(content); imageURL != "" {
-		return imageURL, nil
-	}
-
-	// 如果响应只是文本，返回错误
-	return "", fmt.Errorf("chat response does not contain image data. Response: %s", truncateString(content, 200))
-}
-
-// looksLikeBase64Image 检查字符串是否看起来像 base64 编码的图像
-func looksLikeBase64Image(s string) bool {
-	// base64 编码的 PNG 通常以 iVBORw0KGgo 开头
-	// base64 编码的 JPEG 通常以 /9j/ 开头
-	s = strings.TrimSpace(s)
-	return strings.HasPrefix(s, "iVBORw0KGgo") || strings.HasPrefix(s, "/9j/")
-}
-
-// extractImageFromMarkdown 从 markdown 内容中提取图片 URL
-func extractImageFromMarkdown(content string) string {
-	// 匹配 ![alt](url) 格式
-	start := strings.Index(content, "![")
-	if start == -1 {
-		return ""
-	}
-
-	// 找到 ](
-	bracketClose := strings.Index(content[start:], "](")
-	if bracketClose == -1 {
-		return ""
-	}
-
-	// 找到 URL 的结束位置
-	urlStart := start + bracketClose + 2
-	urlEnd := strings.Index(content[urlStart:], ")")
-	if urlEnd == -1 {
-		return ""
-	}
-
-	return content[urlStart : urlStart+urlEnd]
-}
-
-// truncateString 截断字符串
-func truncateString(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + "..."
-}
-
-// ==================== 流式请求处理 ====================
-
-// createChatCompletionStream 创建流式 Chat Completion 请求并收集完整响应
-// 用于支持仅提供流式接口的第三方 OpenAI 中继服务
-func (p *OpenAIProvider) createChatCompletionStream(ctx context.Context, client *openai.Client, req openai.ChatCompletionRequest) (string, error) {
-	// 创建流式请求
-	stream, err := client.CreateChatCompletionStream(ctx, req)
-	if err != nil {
-		return "", fmt.Errorf("failed to create chat completion stream: %w", err)
-	}
-	defer stream.Close()
-
-	// 收集流式响应内容
-	var fullContent strings.Builder
-	for {
-		response, err := stream.Recv()
-		if err == io.EOF {
-			// 流结束
-			break
-		}
+	req := openai.ImageEditParams{Model: openai.ImageModel(model), Prompt: prompt, Image: openai.ImageEditParamsImageUnion{OfFileArray: readers}, N: openai.Int(1), Size: openai.ImageEditParamsSize(o.size), Quality: openai.ImageEditParamsQuality(o.quality), Background: openai.ImageEditParamsBackground(o.background), OutputFormat: openai.ImageEditParamsOutputFormat(o.format)}
+	if mask != "" {
+		reader, err := imageFile(ctx, mask, p.httpClient)
 		if err != nil {
-			return "", fmt.Errorf("stream receive error: %w", err)
+			return "", err
 		}
-
-		// 提取增量内容
-		if len(response.Choices) > 0 {
-			delta := response.Choices[0].Delta.Content
-			if delta != "" {
-				fullContent.WriteString(delta)
-			}
-		}
+		req.Mask = reader
 	}
-
-	return fullContent.String(), nil
+	if o.format != "png" && p.settings.OpenAIImageCompression != nil {
+		req.OutputCompression = openai.Int(*p.settings.OpenAIImageCompression)
+	}
+	resp, err := p.client.Images.Edit(ctx, req)
+	if err != nil {
+		return "", err
+	}
+	return imageResult(resp, o.format)
 }
 
-// extractImageFromChatContent 从 Chat Completion 的文本内容中提取图像
-// 用于处理流式响应返回的文本内容
-func extractImageFromChatContent(content string) (string, error) {
-	// 检查是否是 base64 图像
-	if strings.HasPrefix(content, "data:image/") {
-		return content, nil
+func responseInput(prompt string, images []string) responses.ResponseNewParamsInputUnion {
+	content := responses.ResponseInputMessageContentListParam{{OfInputText: &responses.ResponseInputTextParam{Text: prompt}}}
+	for _, src := range images {
+		content = append(content, responses.ResponseInputContentUnionParam{OfInputImage: &responses.ResponseInputImageParam{ImageURL: openai.String(src), Detail: "high"}})
 	}
+	return responses.ResponseNewParamsInputUnion{OfInputItemList: responses.ResponseInputParam{{OfMessage: &responses.EasyInputMessageParam{Role: "user", Content: responses.EasyInputMessageContentUnionParam{OfInputItemContentList: content}}}}}
+}
 
-	// 检查内容是否看起来像 base64（无前缀）
-	if looksLikeBase64Image(content) {
-		return "data:image/png;base64," + content, nil
+func (p *OpenAIProvider) responseImage(ctx context.Context, model, imageModel, prompt string, images []string, mask, thinking string, o imageOptions) (string, error) {
+	tool := responses.ToolImageGenerationParam{Model: imageModel, Size: o.size, Quality: o.quality, Background: o.background, OutputFormat: o.format, Action: "generate"}
+	if len(images) > 0 {
+		tool.Action = "edit"
 	}
-
-	// 尝试从 markdown 图片标记中提取
-	if imageURL := extractImageFromMarkdown(content); imageURL != "" {
-		return imageURL, nil
+	if mask != "" {
+		tool.InputImageMask = responses.ToolImageGenerationInputImageMaskParam{ImageURL: openai.String(mask)}
 	}
+	if o.format != "png" && p.settings.OpenAIImageCompression != nil {
+		tool.OutputCompression = openai.Int(*p.settings.OpenAIImageCompression)
+	}
+	req := responses.ResponseNewParams{Model: model, Input: responseInput(prompt, images), Store: openai.Bool(false), Tools: []responses.ToolUnionParam{{OfImageGeneration: &tool}}, Instructions: openai.String(imageAgentInstructions)}
+	req.SetExtraFields(map[string]any{"tool_choice": map[string]string{"type": "image_generation"}})
+	setReasoning(&req, model, thinking)
+	result, err := p.response(ctx, req)
+	if err != nil {
+		return "", err
+	}
+	for _, item := range result.Output {
+		if item.Type == "image_generation_call" {
+			return imageDataURL(item.AsImageGenerationCall().Result, o.format)
+		}
+	}
+	return "", fmt.Errorf("模型未返回图片：%s", truncateString(result.OutputText(), 300))
+}
 
-	// 如果响应只是文本，返回错误
-	return "", fmt.Errorf("chat response does not contain image data. Response: %s", truncateString(content, 200))
+func (p *OpenAIProvider) response(ctx context.Context, req responses.ResponseNewParams) (*responses.Response, error) {
+	resp, err := p.client.Responses.New(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	return checkedResponse(resp)
+}
+func checkedResponse(resp *responses.Response) (*responses.Response, error) {
+	if resp.Status != "completed" {
+		return nil, fmt.Errorf("模型未完成请求 (%s): %s %s", resp.Status, resp.Error.Message, resp.IncompleteDetails.Reason)
+	}
+	return resp, nil
+}
+
+func (p *OpenAIProvider) RecognizeIntent(ctx context.Context, params types.IntentRecognitionParams) (string, error) {
+	if len(params.ReferenceImages) > 16 {
+		return "", fmt.Errorf("最多支持 16 张参考图")
+	}
+	model := params.Model
+	if model == "" {
+		model = p.settings.OpenAITextModel
+	}
+	if p.modelKind(model) != "multimodal" {
+		return "", fmt.Errorf("意图识别请选择已配置的多模态模型")
+	}
+	normalized, err := normalizeOpenAIInputs(params.ReferenceImages)
+	if err != nil {
+		return "", err
+	}
+	params.ReferenceImages = normalized
+	prompt := intentInstructions + "\n用户输入：\n" + params.Message
+	var text string
+	if p.modelKind(model) == "multimodal" {
+		req := responses.ResponseNewParams{Model: model, Input: responseInput(prompt, params.ReferenceImages), Store: openai.Bool(false)}
+		req.SetExtraFields(map[string]any{"text": map[string]any{"format": map[string]any{"type": "json_schema", "name": "image_intents", "strict": true, "schema": intentSchema()}}})
+		setReasoning(&req, model, "low")
+		resp, err := p.response(ctx, req)
+		if err != nil {
+			return "", err
+		}
+		text = resp.OutputText()
+
+	}
+	var result types.IntentRecognitionResponse
+	if err := json.Unmarshal([]byte(text), &result); err != nil {
+		return "", fmt.Errorf("意图识别返回格式不正确: %w", err)
+	}
+	if len(result.Intents) != 3 {
+		return "", fmt.Errorf("意图识别应返回 3 个候选方向")
+	}
+	for _, item := range result.Intents {
+		if strings.TrimSpace(item.Title) == "" || strings.TrimSpace(item.Prompt) == "" || strings.TrimSpace(item.Description) == "" {
+			return "", fmt.Errorf("意图识别返回了不完整的候选方向")
+		}
+	}
+	data, err := json.Marshal(result)
+	return string(data), err
+}
+func truncateString(s string, n int) string {
+	r := []rune(s)
+	if len(r) > n {
+		return string(r[:n]) + "…"
+	}
+	return s
+}
+
+func (p *OpenAIProvider) modelKind(id string) string {
+	for _, m := range p.settings.OpenAIModels {
+		if m.ModelID == id && m.Enabled {
+			if m.Modality == "vision" {
+				return "multimodal"
+			}
+			return m.Modality
+		}
+	}
+	return ""
+}
+func (p *OpenAIProvider) forImageModel(model, tool string) (*OpenAIProvider, error) {
+	next := *p
+	if model != "" {
+		next.settings.OpenAIImageModel = model
+	}
+	kind := next.modelKind(next.settings.OpenAIImageModel)
+	if kind != "image" && kind != "multimodal" {
+		return nil, fmt.Errorf("请选择已配置的生图或多模态模型")
+	}
+	if tool != "" {
+		next.settings.OpenAIImageToolModel = tool
+	}
+	if kind == "multimodal" && next.modelKind(next.settings.OpenAIImageToolModel) != "image" {
+		return nil, fmt.Errorf("请为多模态模型选择一个生图工具模型")
+	}
+	return &next, nil
+}
+
+func (p *OpenAIProvider) ListModels(ctx context.Context) ([]string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	page, err := p.client.Models.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]string, 0, len(page.Data))
+	for _, m := range page.Data {
+		result = append(result, m.ID)
+	}
+	return result, nil
 }

@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { Settings as SettingsType, AISettings } from '../types/settings';
 import { loadSettings, saveSettings } from '../services/settingsService';
-import { X, Save, Loader2, Eye, EyeOff, CheckCircle2, AlertCircle, RefreshCw, Info, Download, ExternalLink, FolderOpen, FolderPlus } from 'lucide-react';
+import { X, Save, Loader2, CheckCircle2, AlertCircle, RefreshCw, Info, Download, ExternalLink, FolderOpen, FolderPlus } from 'lucide-react';
 import { getCurrentVersion, checkForUpdate, updateWithProgress, restartApplication, UpdateInfo, UpdateProgress } from '../services/updateService';
 import ConfirmDialog from './ConfirmDialog';
+import ProviderManager from './ProviderManager';
 import { createProject, getActiveProject, openProject, selectProjectDirectory } from '../services/projectService';
 
 interface SettingsProps {
@@ -18,7 +19,6 @@ const Settings: React.FC<SettingsProps> = ({ isOpen, onClose, onRequestRestart }
   const [settings, setSettings] = useState<SettingsType | null>(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [showApiKeys, setShowApiKeys] = useState<Record<string, boolean>>({});
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [activeTab, setActiveTab] = useState<TabType>('ai');
   const [currentVersion, setCurrentVersion] = useState<string>('');
@@ -195,7 +195,7 @@ const Settings: React.FC<SettingsProps> = ({ isOpen, onClose, onRequestRestart }
       setTimeout(() => setMessage(null), 3000);
     } catch (error) {
       console.error('Failed to save settings:', error);
-      setMessage({ type: 'error', text: '保存设置失败' });
+      setMessage({ type: 'error', text: `保存设置失败：${String(error)}` });
     } finally {
       setSaving(false);
     }
@@ -296,12 +296,6 @@ const Settings: React.FC<SettingsProps> = ({ isOpen, onClose, onRequestRestart }
     });
   };
 
-
-  // 切换 API Key 显示
-  const toggleApiKeyVisibility = (key: string) => {
-    setShowApiKeys((prev) => ({ ...prev, [key]: !prev[key] }));
-  };
-
   if (!isOpen) return null;
 
   if (loading) {
@@ -383,283 +377,7 @@ const Settings: React.FC<SettingsProps> = ({ isOpen, onClose, onRequestRestart }
         <div className="flex-1 overflow-y-auto p-6">
           {activeTab === 'ai' && (
             <div className="space-y-6">
-            {/* Provider Selection */}
-            <div className="space-y-2">
-                <label className="text-sm font-medium text-slate-300">AI 提供商</label>
-                <select
-                  value={settings.ai.provider}
-                  onChange={(e) => updateAISettings({ provider: e.target.value as any })}
-                  className="w-full px-4 py-2 bg-slate-800 border border-slate-700 rounded-lg text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                >
-                  <option value="gemini">Google Gemini</option>
-                  <option value="openai">OpenAI</option>
-                  <option value="cloud">Cloud 云服务</option>
-                </select>
-            </div>
-
-            {/* Gemini Settings */}
-            {settings.ai.provider === 'gemini' && (
-                <div className="space-y-4 p-4 bg-slate-800/50 rounded-lg">
-                  <h3 className="text-lg font-semibold text-slate-200">Gemini 配置</h3>
-                  
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium text-slate-300">API Key</label>
-                    <div className="relative">
-                      <input
-                        type={showApiKeys['gemini'] ? 'text' : 'password'}
-                        value={settings.ai.apiKey}
-                        onChange={(e) => updateAISettings({ apiKey: e.target.value })}
-                        className="w-full px-4 py-2 bg-slate-800 border border-slate-700 rounded-lg text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500 pr-10"
-                        placeholder="输入 Gemini API Key"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => toggleApiKeyVisibility('gemini')}
-                        className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200"
-                      >
-                        {showApiKeys['gemini'] ? <EyeOff size={18} /> : <Eye size={18} />}
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium text-slate-300">文本模型</label>
-                    <input
-                      type="text"
-                      value={settings.ai.textModel}
-                      onChange={(e) => updateAISettings({ textModel: e.target.value })}
-                      className="w-full px-4 py-2 bg-slate-800 border border-slate-700 rounded-lg text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      placeholder="gemini-2.5-flash"
-                    />
-                  </div>
-
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium text-slate-300">图像模型</label>
-                    <input
-                      type="text"
-                      value={settings.ai.imageModel}
-                      onChange={(e) => updateAISettings({ imageModel: e.target.value })}
-                      className="w-full px-4 py-2 bg-slate-800 border border-slate-700 rounded-lg text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      placeholder="gemini-2.5-flash-preview-05-20"
-                    />
-                  </div>
-
-                  {/* Vertex AI */}
-                  <div className="space-y-2">
-                    <label className="flex items-center gap-2 text-sm font-medium text-slate-300">
-                      <input
-                        type="checkbox"
-                        checked={settings.ai.useVertexAI}
-                        onChange={(e) => updateAISettings({ useVertexAI: e.target.checked })}
-                        className="w-4 h-4 text-blue-600 bg-slate-700 border-slate-600 rounded focus:ring-blue-500"
-                      />
-                      使用 Vertex AI
-                    </label>
-                  </div>
-
-                  {settings.ai.useVertexAI && (
-                    <>
-                      <div className="space-y-2">
-                        <label className="text-sm font-medium text-slate-300">GCP 项目 ID</label>
-                        <input
-                          type="text"
-                          value={settings.ai.vertexProject}
-                          onChange={(e) => updateAISettings({ vertexProject: e.target.value })}
-                          className="w-full px-4 py-2 bg-slate-800 border border-slate-700 rounded-lg text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                          placeholder="your-project-id"
-                        />
-                      </div>
-
-                      <div className="space-y-2">
-                        <label className="text-sm font-medium text-slate-300">GCP 区域</label>
-                        <input
-                          type="text"
-                          value={settings.ai.vertexLocation}
-                          onChange={(e) => updateAISettings({ vertexLocation: e.target.value })}
-                          className="w-full px-4 py-2 bg-slate-800 border border-slate-700 rounded-lg text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                          placeholder="us-central1"
-                        />
-                      </div>
-
-                      <div className="space-y-2">
-                        <label className="text-sm font-medium text-slate-300">GCP 服务账号 JSON</label>
-                        <textarea
-                          value={settings.ai.vertexCredentials}
-                          onChange={(e) => updateAISettings({ vertexCredentials: e.target.value })}
-                          className="w-full px-4 py-2 bg-slate-800 border border-slate-700 rounded-lg text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500 h-32 font-mono text-xs"
-                          placeholder="粘贴 GCP 服务账号 JSON"
-                        />
-                      </div>
-                    </>
-                  )}
-                </div>
-            )}
-
-            {/* OpenAI Settings */}
-            {settings.ai.provider === 'openai' && (
-                <div className="space-y-4 p-4 bg-slate-800/50 rounded-lg">
-                  <h3 className="text-lg font-semibold text-slate-200">OpenAI 配置</h3>
-                  
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium text-slate-300">API Key</label>
-                    <div className="relative">
-                      <input
-                        type={showApiKeys['openai'] ? 'text' : 'password'}
-                        value={settings.ai.openaiApiKey}
-                        onChange={(e) => updateAISettings({ openaiApiKey: e.target.value })}
-                        className="w-full px-4 py-2 bg-slate-800 border border-slate-700 rounded-lg text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500 pr-10"
-                        placeholder="输入 OpenAI API Key"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => toggleApiKeyVisibility('openai')}
-                        className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200"
-                      >
-                        {showApiKeys['openai'] ? <EyeOff size={18} /> : <Eye size={18} />}
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium text-slate-300">图像 API Key（可选）</label>
-                    <div className="relative">
-                      <input
-                        type={showApiKeys['openaiImage'] ? 'text' : 'password'}
-                        value={settings.ai.openaiImageApiKey}
-                        onChange={(e) => updateAISettings({ openaiImageApiKey: e.target.value })}
-                        className="w-full px-4 py-2 bg-slate-800 border border-slate-700 rounded-lg text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500 pr-10"
-                        placeholder="输入 OpenAI 图像 API Key（可选）"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => toggleApiKeyVisibility('openaiImage')}
-                        className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200"
-                      >
-                        {showApiKeys['openaiImage'] ? <EyeOff size={18} /> : <Eye size={18} />}
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium text-slate-300">Base URL</label>
-                    <input
-                      type="text"
-                      value={settings.ai.openaiBaseUrl}
-                      onChange={(e) => updateAISettings({ openaiBaseUrl: e.target.value })}
-                      className="w-full px-4 py-2 bg-slate-800 border border-slate-700 rounded-lg text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      placeholder="https://api.openai.com/v1"
-                    />
-                  </div>
-
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium text-slate-300">图像 Base URL（可选）</label>
-                    <input
-                      type="text"
-                      value={settings.ai.openaiImageBaseUrl}
-                      onChange={(e) => updateAISettings({ openaiImageBaseUrl: e.target.value })}
-                      className="w-full px-4 py-2 bg-slate-800 border border-slate-700 rounded-lg text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      placeholder="https://api.openai.com/v1"
-                    />
-                  </div>
-
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium text-slate-300">文本模型</label>
-                    <input
-                      type="text"
-                      value={settings.ai.openaiTextModel}
-                      onChange={(e) => updateAISettings({ openaiTextModel: e.target.value })}
-                      className="w-full px-4 py-2 bg-slate-800 border border-slate-700 rounded-lg text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      placeholder="gpt-4o"
-                    />
-                  </div>
-
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium text-slate-300">图像模型</label>
-                    <input
-                      type="text"
-                      value={settings.ai.openaiImageModel}
-                      onChange={(e) => updateAISettings({ openaiImageModel: e.target.value })}
-                      className="w-full px-4 py-2 bg-slate-800 border border-slate-700 rounded-lg text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      placeholder="dall-e-3"
-                    />
-                  </div>
-
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium text-slate-300">图像模式</label>
-                    <select
-                      value={settings.ai.openaiImageMode}
-                      onChange={(e) => updateAISettings({ openaiImageMode: e.target.value as any })}
-                      className="w-full px-4 py-2 bg-slate-800 border border-slate-700 rounded-lg text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    >
-                      <option value="auto">自动判断</option>
-                      <option value="image_api">Image API</option>
-                      <option value="chat">Chat Completion API</option>
-                    </select>
-                  </div>
-
-                  <div className="space-y-2">
-                    <label className="flex items-center gap-2 text-sm font-medium text-slate-300">
-                      <input
-                        type="checkbox"
-                        checked={settings.ai.openaiTextStream}
-                        onChange={(e) => updateAISettings({ openaiTextStream: e.target.checked })}
-                        className="w-4 h-4 text-blue-600 bg-slate-700 border-slate-600 rounded focus:ring-blue-500"
-                      />
-                      文本模型使用流式请求
-                    </label>
-                  </div>
-
-                  <div className="space-y-2">
-                    <label className="flex items-center gap-2 text-sm font-medium text-slate-300">
-                      <input
-                        type="checkbox"
-                        checked={settings.ai.openaiImageStream}
-                        onChange={(e) => updateAISettings({ openaiImageStream: e.target.checked })}
-                        className="w-4 h-4 text-blue-600 bg-slate-700 border-slate-600 rounded focus:ring-blue-500"
-                      />
-                      图像模型使用流式请求
-                    </label>
-                  </div>
-                </div>
-            )}
-
-            {/* Cloud Settings */}
-            {settings.ai.provider === 'cloud' && (
-                <div className="space-y-4 p-4 bg-slate-800/50 rounded-lg">
-                  <h3 className="text-lg font-semibold text-slate-200">Cloud 云服务配置</h3>
-                  
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium text-slate-300">端点 URL</label>
-                    <input
-                      type="text"
-                      value={settings.ai.cloudEndpointUrl}
-                      onChange={(e) => updateAISettings({ cloudEndpointUrl: e.target.value })}
-                      className="w-full px-4 py-2 bg-slate-800 border border-slate-700 rounded-lg text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      placeholder="https://api.example.com"
-                    />
-                  </div>
-
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium text-slate-300">认证 Token</label>
-                    <div className="relative">
-                      <input
-                        type={showApiKeys['cloud'] ? 'text' : 'password'}
-                        value={settings.ai.cloudToken}
-                        onChange={(e) => updateAISettings({ cloudToken: e.target.value })}
-                        className="w-full px-4 py-2 bg-slate-800 border border-slate-700 rounded-lg text-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500 pr-10"
-                        placeholder="输入 Cloud Token"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => toggleApiKeyVisibility('cloud')}
-                        className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200"
-                      >
-                        {showApiKeys['cloud'] ? <EyeOff size={18} /> : <Eye size={18} />}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-            )}
+              <ProviderManager settings={settings.ai} onChange={updateAISettings} />
 
             </div>
           )}

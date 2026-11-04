@@ -125,17 +125,28 @@ func (a *AIService) createProvider(name string) (provider.AIProvider, error) {
 		return aiProvider, nil
 	}
 
+	var connection *types.ProviderConfig
+	for i := range aiSettings.Providers {
+		if aiSettings.Providers[i].ID == name {
+			connection = &aiSettings.Providers[i]
+			break
+		}
+	}
+	if connection == nil {
+		return nil, fmt.Errorf("服务商已移除或不存在，请重新选择")
+	}
+	if !connection.Enabled {
+		return nil, fmt.Errorf("服务商 %s 已停用", connection.Name)
+	}
 	var aiProvider provider.AIProvider
-
-	switch name {
+	adapterSettings := connection.AdapterSettings()
+	switch connection.Type {
 	case "gemini":
-		aiProvider, err = provider.NewGeminiProvider(a.ctx, aiSettings)
+		aiProvider, err = provider.NewGeminiProvider(a.ctx, adapterSettings)
 	case "openai":
-		aiProvider, err = provider.NewOpenAIProvider(a.ctx, aiSettings)
-	case "cloud":
-		aiProvider, err = provider.NewCloudProvider(a.ctx, aiSettings)
+		aiProvider, err = provider.NewOpenAIProvider(a.ctx, adapterSettings)
 	default:
-		return nil, fmt.Errorf("unsupported AI provider: %s", name)
+		return nil, fmt.Errorf("不支持的服务商类型: %s", connection.Type)
 	}
 
 	if err != nil {
@@ -148,6 +159,9 @@ func (a *AIService) createProvider(name string) (provider.AIProvider, error) {
 
 // loadAISettings 加载 AI 配置（内部方法）
 func (a *AIService) loadAISettings() (types.AISettings, error) {
+	if a.configService == nil {
+		return types.AISettings{}, fmt.Errorf("configuration service unavailable")
+	}
 	settingsJSON, err := a.configService.LoadSettings()
 	if err != nil {
 		return types.AISettings{}, fmt.Errorf("failed to load settings: %w", err)
@@ -167,7 +181,10 @@ func (a *AIService) getCurrentProvider() (provider.AIProvider, error) {
 	if err != nil {
 		return nil, err
 	}
-	return a.GetProvider(aiSettings.Provider)
+	if aiSettings.DefaultProviderID == "" {
+		return nil, fmt.Errorf("请在设置中添加服务商并选择默认项")
+	}
+	return a.GetProvider(aiSettings.DefaultProviderID)
 }
 
 // ReloadProviders 重新加载所有提供商（配置变更时调用）
@@ -214,7 +231,7 @@ func (a *AIService) GenerateImage(paramsJSON string, requestID string) (string, 
 	}
 	defer a.contextManager.CleanupRequest(requestID)
 
-	aiProvider, err := a.getCurrentProvider()
+	aiProvider, err := a.providerForRequest(params.Provider)
 	if err != nil {
 		return "", err
 	}
@@ -266,7 +283,7 @@ func (a *AIService) EditMultiImages(paramsJSON string, requestID string) (string
 	}
 	defer a.contextManager.CleanupRequest(requestID)
 
-	aiProvider, err := a.getCurrentProvider()
+	aiProvider, err := a.providerForRequest(params.Provider)
 	if err != nil {
 		return "", err
 	}
@@ -276,6 +293,12 @@ func (a *AIService) EditMultiImages(paramsJSON string, requestID string) (string
 		return "", fmt.Errorf("aiProvider %s does not support image editing", aiProvider.Name())
 	}
 
+	if params.MaskImage != "" {
+		params.MaskImage, err = a.normalizeImageInput(params.MaskImage)
+		if err != nil {
+			return "", err
+		}
+	}
 	params.Images, err = a.normalizeImageInputs(params.Images)
 	if err != nil {
 		return "", err
@@ -313,8 +336,9 @@ func (a *AIService) RemoveBackground(imageData string, requestID string) (string
 	}
 
 	multiParams := types.MultiImageEditParams{
-		Images: []string{normalized},
-		Prompt: "Remove the background from this image. Keep the main subject intact with high quality. Return the image with transparent background.",
+		Operation: "extract_subject",
+		Images:    []string{normalized},
+		Prompt:    "Remove the background from this image. Keep the main subject intact with high quality. Return the image with transparent background.",
 	}
 
 	result, err := aiProvider.EditMultiImages(reqCtx, multiParams)
@@ -346,7 +370,7 @@ func (a *AIService) RecognizeIntent(paramsJSON string, requestID string) (string
 		return "", fmt.Errorf("failed to create request context: %w", err)
 	}
 	defer a.contextManager.CleanupRequest(requestID)
-	aiProvider, err := a.getCurrentProvider()
+	aiProvider, err := a.providerForRequest(params.Provider)
 	if err != nil {
 		return "", err
 	}
@@ -394,6 +418,14 @@ func (a *AIService) normalizeImageInputs(images []string) ([]string, error) {
 }
 
 func (a *AIService) storeImageResult(imageData string) (string, error) {
+	ref, err := a.storeImageData(imageData)
+	if err != nil {
+		return "", fmt.Errorf("已收到模型图片，但下载或保存失败: %w", err)
+	}
+	return ref, nil
+}
+
+func (a *AIService) storeImageData(imageData string) (string, error) {
 	if imageData == "" {
 		return "", fmt.Errorf("empty image data")
 	}
@@ -428,4 +460,11 @@ func (a *AIService) CancelRequest(requestID string) error {
 		return fmt.Errorf("context manager not initialized")
 	}
 	return a.contextManager.CancelRequest(requestID)
+}
+
+func (a *AIService) providerForRequest(name string) (provider.AIProvider, error) {
+	if name == "" {
+		return a.getCurrentProvider()
+	}
+	return a.GetProvider(name)
 }

@@ -6,6 +6,7 @@ interface ThinkingLevelPickerProps {
   value: ThinkingLevel;
   onChange: (value: ThinkingLevel) => void;
   disabled?: boolean;
+  levels?: ThinkingLevel[];
 }
 
 const options: Array<{
@@ -16,18 +17,23 @@ const options: Array<{
   { value: 'low', label: '低', description: '响应更快，适合简单优化' },
   { value: 'medium', label: '中', description: '速度与质量均衡' },
   { value: 'high', label: '高', description: '复杂意图与细节优先' },
+  { value: 'xhigh', label: '超高', description: '投入更多推理，耗时更长' },
+  { value: 'max', label: '最高', description: '最大推理强度与资源开销' },
 ];
 
 const levelLabels: Record<ThinkingLevel, string> = {
   low: '低',
   medium: '中',
   high: '高',
+  xhigh: '超高',
+  max: '最高',
 };
 
 const ThinkingLevelPicker: React.FC<ThinkingLevelPickerProps> = ({
   value,
   onChange,
   disabled = false,
+  levels = ['low', 'medium', 'high'],
 }) => {
   const [isOpen, setIsOpen] = useState(false);
   const pickerRef = useRef<HTMLDivElement>(null);
@@ -70,7 +76,7 @@ const ThinkingLevelPicker: React.FC<ThinkingLevelPickerProps> = ({
           aria-label="思考强度"
           className="absolute bottom-full left-0 z-50 mb-3 w-56 overflow-hidden rounded-xl border border-slate-700 bg-slate-900 p-1.5 shadow-2xl shadow-black/40"
         >
-          {options.map((option) => {
+          {options.filter(option => levels.includes(option.value)).map((option) => {
             const isSelected = option.value === value;
             return (
               <button

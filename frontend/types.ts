@@ -12,6 +12,7 @@ export interface CanvasImage {
 export type MessageType = 'text' | 'system' | 'error';
 
 export interface ChatMessage {
+  operationOptions?: ImageOperationOptions;
   id: string;
   role: 'user' | 'model';
   type?: MessageType;
@@ -33,7 +34,16 @@ export interface Viewport {
   zoom: number;
 }
 
-export interface Attachment {
+export interface ImageOperationOptions {
+ provider?: string;
+ model?: string;
+ imageToolModel?: string;
+ operation?: 'edit' | 'reference' | 'extract_subject' | 'extract_mid' | 'extract_bg' | 'enhance' | 'expand';
+ maskImage?: string;
+ outputSize?: string;
+}
+
+export interface Attachment extends ImageOperationOptions {
   id: string;
   type: 'canvas' | 'local' | 'url';
   content: string; // canvas: imageId, local: data URL, url: image ref URL
@@ -41,7 +51,7 @@ export interface Attachment {
 
 export type AspectRatio = "1:1" | "16:9" | "9:16" | "4:3" | "3:4";
 export type ImageSize = "1K" | "2K" | "4K";
-export type ThinkingLevel = 'low' | 'medium' | 'high';
+export type ThinkingLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
 export interface IntentOption {
   title: string;
@@ -50,6 +60,10 @@ export interface IntentOption {
 }
 
 export interface ModelSettings {
+ provider?: string;
+ model?: string;
+ imageToolModel?: string;
+ intentModel?: string;
   temperature: number;
   topP: number;
   topK: number;
@@ -63,4 +77,10 @@ export interface ExpandOffsets {
   right: number;  // 右侧扩展像素
   bottom: number; // 底部扩展像素
   left: number;   // 左侧扩展像素
+}
+
+export interface ExpandedImage {
+ image: string;
+ mask: string;
+ size: string;
 }

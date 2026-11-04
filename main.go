@@ -20,7 +20,7 @@ func main() {
 	// Create application with options
 	err := wails.Run(&options.App{
 		Title:     "ArtifexBot",
-		Width:     1536,
+		Width:     1680,
 		Height:    960,
 		MinWidth:  1280,
 		MinHeight: 800,

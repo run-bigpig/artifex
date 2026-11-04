@@ -13,7 +13,7 @@ export const loadSettings = async (): Promise<Settings> => {
   try {
     const settingsJSON = await LoadSettings();
     const settings: Settings = JSON.parse(settingsJSON);
-    return settings;
+    return { ...defaultSettings, ...settings, ai: { ...defaultSettings.ai, ...settings.ai } };
   } catch (error) {
     console.error('Failed to load settings:', error);
     // 返回默认设置
@@ -29,6 +29,7 @@ export const saveSettings = async (settings: Settings): Promise<void> => {
   try {
     const settingsJSON = JSON.stringify(settings);
     await SaveSettings(settingsJSON);
+    window.dispatchEvent(new Event("ai-settings-changed"));
   } catch (error) {
     console.error('Failed to save settings:', error);
     throw error;

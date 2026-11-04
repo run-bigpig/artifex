@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { CanvasImage, Viewport, CanvasActionType, Attachment, ModelSettings } from './types';
+import { CanvasImage, Viewport, CanvasActionType, Attachment, ModelSettings, ExpandedImage } from './types';
 import Canvas from './components/Canvas';
 import Sidebar from './components/Sidebar';
+import { SIDEBAR_WIDTH } from './utils/layout';
 import Header from './components/Header';
 import LoadingOverlay from './components/LoadingOverlay';
 import { generateImage, editMultiImages } from './services/aiService';
@@ -93,11 +94,9 @@ const App: React.FC = () => {
 
   // Helper to get canvas container dimensions
   const getCanvasDimensions = () => {
-    // Sidebar is always 420px wide now
-    const sidebarWidth = 420;
     // Header height is 64px (pt-16 in Tailwind = 4rem = 64px)
     const headerHeight = 64;
-    const canvasWidth = window.innerWidth - sidebarWidth;
+    const canvasWidth = window.innerWidth - SIDEBAR_WIDTH;
     const canvasHeight = window.innerHeight - headerHeight;
     return { width: canvasWidth, height: canvasHeight };
   };
@@ -329,7 +328,8 @@ const App: React.FC = () => {
           newAttachments.push({
             id: generateId(),
             type: 'canvas',
-            content: affectedId
+            content: affectedId,
+            operation: action === 'extract_subject' || action === 'extract_mid' || action === 'extract_bg' || action === 'enhance' ? action : 'edit',
           });
       });
 
@@ -383,16 +383,19 @@ const App: React.FC = () => {
   };
 
   // 处理扩图生成完成
-  const handleGenerateExpanded = async (imageId: string, expandedBase64: string) => {
+  const handleGenerateExpanded = async (imageId: string, expandedBase64: ExpandedImage) => {
     // 1. 首先清空参考图输入框的内容
     setAttachments([]);
     try {
-      const imageRef = await storeImage(expandedBase64);
+      const imageRef = await storeImage(expandedBase64.image);
       // 2. 然后将扩图后的图片添加到参考图列表
       setAttachments([{
         id: generateId(),
         type: 'url',
-        content: imageRef
+        content: imageRef,
+        operation: 'expand',
+        maskImage: expandedBase64.mask,
+        outputSize: expandedBase64.size,
       }]);
     } catch (error) {
       console.error('Failed to store expanded image:', error);
@@ -555,7 +558,8 @@ const App: React.FC = () => {
         base64Sources,
         prompt,
         modelSettings.imageSize || undefined,
-        modelSettings.aspectRatio || undefined
+        modelSettings.aspectRatio || undefined,
+        'medium', undefined, { provider: modelSettings.provider, model: modelSettings.model, imageToolModel: modelSettings.imageToolModel }
       );
       const { width, height } = await loadImageDimensions(imageRef);
 

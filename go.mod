@@ -1,21 +1,24 @@
 module artifex
 
-go 1.24.0
+go 1.26.0
 
 require (
-	cloud.google.com/go/auth v0.17.0
 	github.com/blang/semver v3.5.1+incompatible
+	github.com/openai/openai-go/v3 v3.93.0
 	github.com/run-bigpig/go-github-selfupdate v1.0.1
-	github.com/sashabaranov/go-openai v1.41.2
-	github.com/wailsapp/wails/v2 v2.11.0
-	golang.org/x/crypto v0.45.0
-	google.golang.org/genai v1.36.0
+	github.com/wailsapp/wails/v2 v2.13.0
+	golang.org/x/crypto v0.57.0
+	golang.org/x/image v0.47.0
+	google.golang.org/genai v1.77.0
 )
 
 require (
 	cloud.google.com/go v0.116.0 // indirect
+	cloud.google.com/go/auth v0.17.0 // indirect
 	cloud.google.com/go/compute/metadata v0.8.0 // indirect
+	git.sr.ht/~jackmordaunt/go-toast/v2 v2.0.3 // indirect
 	github.com/bep/debounce v1.2.1 // indirect
+	github.com/coder/websocket v1.8.15 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
@@ -44,6 +47,10 @@ require (
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/samber/lo v1.49.1 // indirect
 	github.com/tcnksm/go-gitconfig v0.1.2 // indirect
+	github.com/tidwall/gjson v1.20.0 // indirect
+	github.com/tidwall/match v1.1.1 // indirect
+	github.com/tidwall/pretty v1.2.1 // indirect
+	github.com/tidwall/sjson v1.2.5 // indirect
 	github.com/tkrajina/go-reflector v0.5.8 // indirect
 	github.com/ulikunitz/xz v0.5.9 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
@@ -56,10 +63,10 @@ require (
 	go.opentelemetry.io/otel/metric v1.36.0 // indirect
 	go.opentelemetry.io/otel/trace v1.36.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
-	golang.org/x/net v0.47.0 // indirect
+	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/oauth2 v0.30.0 // indirect
-	golang.org/x/sys v0.38.0 // indirect
-	golang.org/x/text v0.31.0 // indirect
+	golang.org/x/sys v0.49.0 // indirect
+	golang.org/x/text v0.43.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250603155806-513f23925822 // indirect
 	google.golang.org/grpc v1.74.2 // indirect
 	google.golang.org/protobuf v1.36.7 // indirect
